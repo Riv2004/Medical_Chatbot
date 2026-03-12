@@ -12,11 +12,12 @@ from helper import load_pdf_files, filter_to_minimal_docs, split_docs, get_embed
 load_dotenv()
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "medical-chatbot")
+INDEX_NAME       = os.getenv("PINECONE_INDEX_NAME", "medical-chatbot")
 
 if not PINECONE_API_KEY:
     raise ValueError("PINECONE_API_KEY is not set in environment variables.")
 
+# ── Create / verify index ────────────────────────────────────────────────────
 pc = Pinecone(api_key=PINECONE_API_KEY)
 
 existing_indexes = pc.list_indexes().names()
@@ -36,22 +37,46 @@ if INDEX_NAME not in existing_indexes:
 else:
     print(f"Using existing index: {INDEX_NAME}")
 
-index = pc.Index(INDEX_NAME)
-print("Index ready:", INDEX_NAME)
-
-print("Loading and processing PDFs...")
-docs = load_pdf_files()
+# ── Load, filter, split ───────────────────────────────────────────────────────
+print("\nLoading and processing PDFs...")
+docs         = load_pdf_files()
 minimal_docs = filter_to_minimal_docs(docs)
-texts_chunk = split_docs(minimal_docs)
-print(f"Number of text chunks: {len(texts_chunk)}")
+chunks       = split_docs(minimal_docs)
+print(f"Total chunks: {len(chunks)}")
 
 embeddings = get_embeddings()
 
-print("Creating / updating Pinecone vector store...")
-vector_store = PineconeVectorStore.from_documents(
-    documents=texts_chunk,
-    embedding=embeddings,
-    index_name=INDEX_NAME
-)
+# ── Split by namespace ────────────────────────────────────────────────────────
+general_chunks   = [c for c in chunks if c.metadata.get("book_type") in ("disease", "herbal")]
+nutrition_chunks = [c for c in chunks if c.metadata.get("book_type") == "nutrition"]
 
-print("Index populated successfully.")
+# Fallback: if book_type not tagged, put everything in general
+if not general_chunks and not nutrition_chunks:
+    print("⚠️  No book_type tags found — upserting all chunks to namespace 'general'")
+    general_chunks = chunks
+
+print(f"\nDisease + Herbal chunks → namespace 'general'  : {len(general_chunks)}")
+print(f"Nutrition chunks        → namespace 'nutrition' : {len(nutrition_chunks)}")
+
+# ── Upsert ────────────────────────────────────────────────────────────────────
+if general_chunks:
+    print("\nUpserting general chunks...")
+    PineconeVectorStore.from_documents(
+        documents=general_chunks,
+        embedding=embeddings,
+        index_name=INDEX_NAME,
+        namespace="general"
+    )
+    print(f"✅ {len(general_chunks)} chunks → namespace 'general'")
+
+if nutrition_chunks:
+    print("\nUpserting nutrition chunks...")
+    PineconeVectorStore.from_documents(
+        documents=nutrition_chunks,
+        embedding=embeddings,
+        index_name=INDEX_NAME,
+        namespace="nutrition"
+    )
+    print(f"✅ {len(nutrition_chunks)} chunks → namespace 'nutrition'")
+
+print("\n✅ Index populated successfully.")

@@ -1,81 +1,874 @@
-<link href="//maxcdn.bootstrapcdn.com/bootstrap/4.1.1/css/bootstrap.min.css" rel="stylesheet" id="bootstrap-css">
-<script src="//maxcdn.bootstrapcdn.com/bootstrap/4.1.1/js/bootstrap.min.js"></script>
-<script src="//cdnjs.cloudflare.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
-
 <!DOCTYPE html>
 <html>
-	<head>
-		<title>Chatbot</title>
-		<link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.1.3/css/bootstrap.min.css" integrity="sha384-MCw98/SFnGE8fJT3GXwEOngsV7Zt27NXFoaoApmYm81iuXoPkFOJwJ8ERdknLPMO" crossorigin="anonymous">
-		<link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.5.0/css/all.css" integrity="sha384-B4dIYHKNBt8Bc12p+WXckhzcICo0wtJAoU8YZTY5qE0Id1GSseTk6S+L3BlXeVIU" crossorigin="anonymous">
-		<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
-		<link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='style.css')}}"/>
-	</head>
-	
-	
-	<body>
-		<div class="container-fluid h-100">
-			<div class="row justify-content-center h-100">		
-				<div class="col-md-8 col-xl-6 chat">
-					<div class="card">
-						<div class="card-header msg_head">
-							<div class="d-flex bd-highlight">
-								<div class="img_cont">
-									<img src="https://cdn-icons-png.flaticon.com/512/387/387569.png" class="rounded-circle user_img">
-									<!-- <img src="https://www.prdistribution.com/spirit/uploads/pressreleases/2019/newsreleases/d83341deb75c4c4f6b113f27b1e42cd8-chatbot-florence-already-helps-thousands-of-patients-to-remember-their-medication.png" class="rounded-circle user_img"> -->
-									<span class="online_icon"></span>
-								</div>
-								<div class="user_info">
-									<span>Medical Chatbot</span>
-									<p>Ask me anything!</p>
-								</div>
-							</div>
-						</div>
-						<div id="messageFormeight" class="card-body msg_card_body">
-							
-							
-						</div>
-						<div class="card-footer">
-							<form id="messageArea" class="input-group">
-                                <input type="text" id="text" name="msg" placeholder="Type your message..." autocomplete="off" class="form-control type_msg" required/>
-								<div class="input-group-append">
-									<button type="submit" id="send" class="input-group-text send_btn"><i class="fas fa-location-arrow"></i></button>
-								</div>
-							</form>
-						</div>
-					</div>
-				</div>
-			</div>
-		</div>
-		
-		<script>
-			$(document).ready(function() {
-				$("#messageArea").on("submit", function(event) {
-					const date = new Date();
-					const hour = date.getHours();
-					const minute = date.getMinutes();
-					const str_time = hour+":"+minute;
-					var rawText = $("#text").val();
+<head>
+    <title>Medical Chatbot</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.1.3/css/bootstrap.min.css"
+          integrity="sha384-MCw98/SFnGE8fJT3GXwEOngsV7Zt27NXFoaoApmYm81iuXoPkFOJwJ8ERdknLPMO" crossorigin="anonymous">
+    <link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.5.0/css/all.css"
+          integrity="sha384-B4dIYHKNBt8Bc12p+WXckhzcICo0wtJAoU8YZTY5qE0Id1GSseTk6S+L3BlXeVIU" crossorigin="anonymous">
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='style.css') }}"/>
+</head>
 
-					var userHtml = '<div class="d-flex justify-content-end mb-4"><div class="msg_cotainer_send">' + rawText + '<span class="msg_time_send">'+ str_time + '</span></div><div class="img_cont_msg"><img src="https://i.ibb.co/d5b84Xw/Untitled-design.png" class="rounded-circle user_img_msg"></div></div>';
-					
-					$("#text").val("");
-					$("#messageFormeight").append(userHtml);
+<body>
+<div class="container-fluid h-100">
+    <div class="row justify-content-center h-100">
 
-					$.ajax({
-						data: {
-							msg: rawText,	
-						},
-						type: "POST",
-						url: "/get",
-					}).done(function(data) {
-						var botHtml = '<div class="d-flex justify-content-start mb-4"><div class="img_cont_msg"><img src="https://cdn-icons-png.flaticon.com/512/387/387569.png" class="rounded-circle user_img_msg"></div><div class="msg_cotainer">' + data + '<span class="msg_time">' + str_time + '</span></div></div>';
-						$("#messageFormeight").append($.parseHTML(botHtml));
-					});
-					event.preventDefault();
-				});
-			});
-		</script>
-        
-    </body>
+        <!-- ── Session History Sidebar ────────────────────────────────── -->
+        <div class="col-md-3 col-xl-2 d-none d-md-flex flex-column" id="sidebar-col"
+             style="padding:20px 10px; max-height:100vh; overflow-y:auto;">
+            <div class="text-white mb-3" style="font-size:13px; opacity:.7;">
+                <i class="fas fa-history mr-1"></i> Past Conversations
+            </div>
+            <button class="btn btn-sm btn-outline-light mb-3 w-100" onclick="startNewSession()">
+                <i class="fas fa-plus mr-1"></i> New Chat
+            </button>
+            <div id="session-list" style="flex:1; overflow-y:auto;"></div>
+        </div>
+
+        <!-- ── Main Chat ──────────────────────────────────────────────── -->
+        <div class="col-md-8 col-xl-6 chat">
+            <div class="card">
+
+                <!-- Header -->
+                <div class="card-header msg_head">
+                    <div class="d-flex bd-highlight align-items-center">
+                        <div class="img_cont">
+                            <img src="https://cdn-icons-png.flaticon.com/512/387/387569.png"
+                                 class="rounded-circle user_img">
+                            <span class="online_icon"></span>
+                        </div>
+                        <div class="user_info">
+                            <span>Medical Chatbot</span>
+                            <p id="session-label">Ask me anything!</p>
+                        </div>
+                        <!-- Mobile history toggle -->
+                        <div class="ml-auto d-md-none">
+                            <button class="btn btn-sm" onclick="toggleMobileSidebar()"
+                                    style="background:rgba(255,255,255,.15);color:#fff;border-radius:8px;">
+                                <i class="fas fa-history"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Messages -->
+                <div id="messageFormeight" class="card-body msg_card_body">
+
+                    <!-- Welcome message -->
+                    <div class="d-flex justify-content-start mb-4">
+                        <div class="img_cont_msg">
+                            <img src="https://cdn-icons-png.flaticon.com/512/387/387569.png"
+                                 class="rounded-circle user_img_msg">
+                        </div>
+                        <div class="msg_cotainer">
+                            Hello! 👋 I'm your Medical Assistant.<br><br>
+                            You can <b>type symptoms</b>, 📷 <b>upload an image</b>
+                            (rash, prescription, report), or tap 🎤 to <b>speak</b>.<br><br>
+                            I'll identify the likely condition and give you a
+                            personalised daily <b>nutrition plan</b>.<br><br>
+                            <small style="opacity:.7;">
+                                ⚠️ For educational purposes only. Always consult a qualified doctor.
+                            </small>
+                            <span class="msg_time">now</span>
+                        </div>
+                    </div>
+
+                </div><!-- /msg_card_body -->
+
+                <!-- Footer / Input -->
+                <div class="card-footer">
+
+                    <!-- Image preview bar -->
+                    <div id="img-preview-bar"
+                         style="display:none; background:rgba(0,0,0,.25); border-radius:10px;
+                                padding:6px 12px; margin-bottom:8px; align-items:center; gap:10px;">
+                        <img id="img-thumb" src="" alt=""
+                             style="width:40px;height:40px;object-fit:cover;border-radius:6px;">
+                        <span id="img-filename"
+                              style="color:#ccc;font-size:12px;flex:1;white-space:nowrap;
+                                     overflow:hidden;text-overflow:ellipsis;"></span>
+                        <button onclick="removeImage()"
+                                style="background:none;border:none;color:#f77;font-size:16px;cursor:pointer;">
+                            ✕
+                        </button>
+                    </div>
+
+                    <!-- Recording indicator -->
+                    <div id="rec-indicator"
+                         style="display:none; align-items:center; gap:8px;
+                                background:rgba(255,80,80,.15); border-radius:10px;
+                                padding:5px 12px; margin-bottom:8px; color:#ff8a80; font-size:12px;">
+                        <span style="width:9px;height:9px;background:#f44336;border-radius:50%;
+                                     animation:pulse 1s infinite;display:inline-block;"></span>
+                        Recording… tap 🎤 again to stop
+                    </div>
+
+                    <form id="messageArea" class="input-group">
+                        <!-- Hidden file input -->
+                        <input type="file" id="image-input" accept="image/*"
+                               style="display:none;" onchange="handleImageSelect(event)"/>
+
+                        <input type="text" id="text" name="msg"
+                               placeholder="Type your message..."
+                               autocomplete="off" class="form-control type_msg" required/>
+
+                        <div class="input-group-append">
+                            <!-- Image button -->
+                            <button type="button" class="input-group-text attach_btn"
+                                    onclick="document.getElementById('image-input').click()"
+                                    title="Upload image">
+                                <i class="fas fa-image"></i>
+                            </button>
+                            <!-- Voice button -->
+                            <button type="button" class="input-group-text attach_btn"
+                                    id="voice-btn" onclick="toggleRecording()" title="Voice input">
+                                <i class="fas fa-microphone" id="voice-icon"></i>
+                            </button>
+                            <!-- Send button -->
+                            <button type="submit" id="send"
+                                    class="input-group-text send_btn" title="Send">
+                                <i class="fas fa-location-arrow"></i>
+                            </button>
+                        </div>
+                    </form>
+                </div><!-- /card-footer -->
+
+            </div><!-- /card -->
+        </div><!-- /col -->
+    </div><!-- /row -->
+</div><!-- /container -->
+
+<!-- Mobile sidebar overlay -->
+<div id="mobile-sidebar"
+     style="display:none; position:fixed; top:0; left:0; width:80%; max-width:280px;
+            height:100%; background:rgba(33,33,78,.97); z-index:1000;
+            padding:20px; overflow-y:auto; box-shadow:4px 0 20px rgba(0,0,0,.5);">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <span class="text-white" style="font-size:14px;">
+            <i class="fas fa-history mr-2"></i>Past Chats
+        </span>
+        <button onclick="toggleMobileSidebar()"
+                style="background:none;border:none;color:#fff;font-size:18px;">✕</button>
+    </div>
+    <button class="btn btn-sm btn-outline-light mb-3 w-100" onclick="startNewSession()">
+        <i class="fas fa-plus mr-1"></i> New Chat
+    </button>
+    <div id="mobile-session-list"></div>
+</div>
+
+<!-- ── Severity Alert Modal ─────────────────────────────────────── -->
+<div id="severity-overlay"
+     style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.75);
+            z-index:2000; align-items:center; justify-content:center;">
+    <div id="severity-modal"
+         style="background:#1a1a2e; border-radius:18px; padding:28px 24px;
+                max-width:360px; width:90%; text-align:center;
+                box-shadow:0 8px 40px rgba(0,0,0,.6); position:relative;
+                border:2px solid #ff1744; animation:modalIn .3s ease;">
+        <button onclick="closeSeverityAlert()"
+                style="position:absolute;top:12px;right:14px;background:none;
+                       border:none;color:rgba(255,255,255,.5);font-size:20px;cursor:pointer;">&#x2715;</button>
+        <div id="alert-icon" style="font-size:48px;margin-bottom:10px;">&#x1F6A8;</div>
+        <div id="alert-title"
+             style="font-size:18px;font-weight:700;color:#ff1744;
+                    margin-bottom:10px;line-height:1.3;"></div>
+        <div id="alert-message"
+             style="font-size:13px;color:rgba(255,255,255,.85);
+                    margin-bottom:18px;line-height:1.6;"></div>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+            <a id="alert-hospital-btn" href="https://www.google.com/maps/search/hospital+near+me"
+               target="_blank"
+               style="display:block;padding:11px;border-radius:10px;
+                      background:#ff1744;color:#fff;font-weight:600;
+                      font-size:14px;text-decoration:none;">
+                &#x1F4CD; Find Nearest Hospital
+            </a>
+            <a id="alert-call-btn" href="tel:108"
+               style="display:none;padding:11px;border-radius:10px;
+                      background:rgba(255,23,68,.15);color:#ff6d6d;
+                      border:1px solid rgba(255,23,68,.4);
+                      font-weight:600;font-size:14px;text-decoration:none;">
+                &#x1F4DE; Call Emergency (108)
+            </a>
+            <button onclick="closeSeverityAlert()"
+                    style="padding:10px;border-radius:10px;
+                           background:rgba(255,255,255,.08);color:rgba(255,255,255,.6);
+                           border:1px solid rgba(255,255,255,.15);
+                           font-size:13px;cursor:pointer;">
+                I understand, dismiss
+            </button>
+        </div>
+        <div style="margin-top:14px;font-size:10px;color:rgba(255,255,255,.35);line-height:1.4;">
+            This is an AI pre-screening only. Always consult a qualified medical professional.
+        </div>
+    </div>
+</div>
+
+<style>
+    /* ── Pulse animation for recording dot ── */
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.2} }
+
+    /* ── Disease badge ── */
+    .disease-badge {
+        display: inline-block;
+        background: rgba(255,160,0,.2);
+        color: #ffcc02;
+        border: 1px solid rgba(255,200,0,.3);
+        border-radius: 20px;
+        padding: 2px 10px;
+        font-size: 11px;
+        font-weight: 600;
+        margin-bottom: 6px;
+        letter-spacing: .3px;
+    }
+
+    /* ── Nutrition table inside bubble ── */
+    .msg_cotainer table,
+    .msg_cotainer_send table {
+        border-collapse: collapse;
+        width: 100%;
+        margin-top: 8px;
+        font-size: 12px;
+        color: #fff;
+    }
+    .msg_cotainer table th {
+        background: rgba(0,0,0,.3);
+        padding: 5px 8px;
+        text-align: left;
+        border-bottom: 1px solid rgba(255,255,255,.2);
+    }
+    .msg_cotainer table td {
+        padding: 4px 8px;
+        border-bottom: 1px solid rgba(255,255,255,.1);
+    }
+    .msg_cotainer table tr:nth-child(even) td {
+        background: rgba(0,0,0,.15);
+    }
+
+    /* ── Typing dots ── */
+    .typing-dots span {
+        display:inline-block; width:7px; height:7px;
+        background:rgba(255,255,255,.6); border-radius:50%;
+        margin:0 2px; animation:bounce 1.2s infinite;
+    }
+    .typing-dots span:nth-child(2){animation-delay:.2s}
+    .typing-dots span:nth-child(3){animation-delay:.4s}
+    @keyframes bounce {0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-6px)}}
+
+    /* ── Session items in sidebar ── */
+    .session-item {
+        padding: 8px 10px;
+        border-radius: 8px;
+        cursor: pointer;
+        margin-bottom: 6px;
+        border: 1px solid rgba(255,255,255,.1);
+        background: rgba(255,255,255,.05);
+        transition: background .2s;
+    }
+    .session-item:hover, .session-item.active {
+        background: rgba(255,255,255,.15);
+    }
+    .session-item .s-date { font-size:10px; color:rgba(255,255,255,.4); }
+    .session-item .s-preview {
+        font-size:12px; color:rgba(255,255,255,.8);
+        white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+        margin-top:2px;
+    }
+
+    /* ── Voice btn active state ── */
+    #voice-btn.recording {
+        background: rgba(244,67,54,.4) !important;
+        color: #ff8a80 !important;
+    }
+
+    /* ── Uploaded image in chat ── */
+    .chat-image {
+        max-width: 180px;
+        border-radius: 10px;
+        display: block;
+        margin-bottom: 6px;
+    }
+
+    /* ── Bullet list inside bubble ── */
+    .msg_cotainer ul { margin: 6px 0 4px 16px; padding: 0; }
+    .msg_cotainer li { margin-bottom: 3px; font-size: 13px; }
+
+    /* ── Severity alert modal animation ── */
+    @keyframes modalIn {
+        from { transform:scale(.85); opacity:0; }
+        to   { transform:scale(1);   opacity:1; }
+    }
+
+    /* ── Severity badge inside chat bubble ── */
+    .severity-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 10px;
+        padding: 8px 12px;
+        border-radius: 10px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: opacity .2s;
+    }
+    .severity-bar:hover { opacity: .85; }
+    .severity-CRITICAL { background:rgba(255,23,68,.25);  color:#ff6d6d; border:1px solid rgba(255,23,68,.4); }
+    .severity-URGENT   { background:rgba(255,109,0,.2);   color:#ffab40; border:1px solid rgba(255,109,0,.3); }
+    .severity-MODERATE { background:rgba(255,214,0,.15);  color:#ffd600; border:1px solid rgba(255,214,0,.25); }
+    .severity-MILD     { background:rgba(0,200,83,.15);   color:#69f0ae; border:1px solid rgba(0,200,83,.25); }
+
+    /* ── Check-in bubble ── */
+    .checkin-bubble {
+        background: rgba(255,255,255,.07);
+        border: 1px solid rgba(255,255,255,.15);
+        border-radius: 16px;
+        padding: 14px 16px;
+        margin-bottom: 16px;
+        font-size: 13px;
+        color: rgba(255,255,255,.9);
+        line-height: 1.6;
+    }
+    .checkin-input {
+        width: 100%;
+        background: rgba(0,0,0,.3);
+        border: 1px solid rgba(255,255,255,.15);
+        border-radius: 10px;
+        color: #fff;
+        padding: 8px 12px;
+        font-size: 13px;
+        margin-top: 10px;
+        outline: none;
+        resize: none;
+    }
+    .checkin-input:focus { border-color: rgba(255,255,255,.35); }
+    .checkin-send-btn {
+        margin-top: 8px;
+        padding: 7px 18px;
+        border-radius: 10px;
+        background: rgba(82,172,255,.3);
+        border: 1px solid rgba(82,172,255,.4);
+        color: #fff;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background .2s;
+    }
+    .checkin-send-btn:hover { background: rgba(82,172,255,.5); }
+
+    /* ── Progress result card ── */
+    .progress-card {
+        border-radius: 12px;
+        padding: 12px 14px;
+        margin-top: 8px;
+        font-size: 13px;
+        line-height: 1.6;
+    }
+</style>
+
+<script>
+// ════════════════════════════════════════════════════════════════════════════
+// STATE
+// ════════════════════════════════════════════════════════════════════════════
+let currentSessionId = null;
+let selectedImageFile = null;
+let mediaRecorder = null;
+let audioChunks   = [];
+let isRecording   = false;
+
+// ════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ════════════════════════════════════════════════════════════════════════════
+function timeStr() {
+    const d = new Date();
+    return d.getHours() + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+
+/** Minimal markdown → HTML: bold, italic, bullet lists, tables */
+function md(text) {
+    return text
+        .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+        .replace(/\*(.+?)\*/g,     '<i>$1</i>')
+        .replace(/`(.+?)`/g,       '<code style="background:rgba(0,0,0,.3);padding:1px 4px;border-radius:3px;">$1</code>')
+        .replace(/^#{1,3}\s+(.+)$/gm, '<b>$1</b>')
+        .replace(/^\s*[-•]\s+(.+)$/gm, '<li>$1</li>')
+        .replace(/(<li>[\s\S]*?<\/li>)/g, '<ul>$1</ul>')
+        .replace(/(\|.+\|\n\|[-| :]+\|\n(?:\|.+\|\n?)+)/g, mdTable)
+        .replace(/\n/g, '<br>');
+}
+
+function mdTable(block) {
+    const rows = block.trim().split('\n');
+    let html = '<table>';
+    rows.forEach((row, i) => {
+        if (/^[|: -]+$/.test(row.replace(/\|/g, ''))) return;
+        const cells = row.split('|').filter(c => c.trim() !== '');
+        const tag   = i === 0 ? 'th' : 'td';
+        html += '<tr>' + cells.map(c => `<${tag}>${c.trim()}</${tag}>`).join('') + '</tr>';
+    });
+    return html + '</table>';
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// APPEND MESSAGES
+// ════════════════════════════════════════════════════════════════════════════
+function appendUser(text, imageUrl) {
+    let inner = '';
+    if (imageUrl) inner += `<img src="${imageUrl}" class="chat-image">`;
+    inner += text;
+    $("#messageFormeight").append(
+        `<div class="d-flex justify-content-end mb-4">
+           <div class="msg_cotainer_send">${inner}
+             <span class="msg_time_send">${timeStr()}</span>
+           </div>
+           <div class="img_cont_msg">
+             <img src="https://i.ibb.co/d5b84Xw/Untitled-design.png"
+                  class="rounded-circle user_img_msg">
+           </div>
+         </div>`
+    );
+    scrollBottom();
+}
+
+function appendBot(data) {
+    const badge = data.disease && data.disease !== "general"
+        ? `<div class="disease-badge">&#x1F52C; ${data.disease.toUpperCase()}</div><br>`
+        : "";
+    const bodyHtml = md(data.reply || data.error || "");
+
+    // Severity bar (clickable — re-opens the alert)
+    let severityBar = "";
+    const sev = data.severity;
+    if (sev) {
+        const icons = { CRITICAL:"&#x1F6A8;", URGENT:"&#x26A0;&#xFE0F;", MODERATE:"&#x2139;&#xFE0F;", MILD:"&#x2705;" };
+        severityBar = `<div class="severity-bar severity-${sev.severity}"
+                            onclick='showSeverityAlert(${JSON.stringify(sev)})'>
+                         ${icons[sev.severity] || "&#x2139;"} ${sev.severity}
+                         &nbsp;&#x2014;&nbsp;${sev.alert_title}
+                       </div>`;
+    }
+
+    const html = `<div class="d-flex justify-content-start mb-4">
+                    <div class="img_cont_msg">
+                      <img src="https://cdn-icons-png.flaticon.com/512/387/387569.png"
+                           class="rounded-circle user_img_msg">
+                    </div>
+                    <div class="msg_cotainer">
+                      ${badge}${bodyHtml}${severityBar}
+                      <span class="msg_time">${timeStr()}</span>
+                    </div>
+                  </div>`;
+    $("#messageFormeight").append(html);
+    scrollBottom();
+
+    // Auto-show modal for CRITICAL and URGENT
+    if (sev && sev.show_alert) {
+        setTimeout(() => showSeverityAlert(sev), 600);
+    }
+}
+
+// ── Severity Alert Modal controls ────────────────────────────────────────────
+function showSeverityAlert(sev) {
+    $("#alert-icon").html(sev.alert_icon || "&#x26A0;");
+    $("#alert-title").text(sev.alert_title);
+    $("#alert-message").text(sev.alert_message);
+    $("#alert-hospital-btn").attr("href", sev.hospital_url || "https://www.google.com/maps/search/hospital+near+me");
+
+    // Update modal border color
+    $("#severity-modal").css("border-color", sev.alert_color || "#ff1744");
+    $("#alert-title").css("color", sev.alert_color || "#ff1744");
+
+    // Show call button only for CRITICAL
+    if (sev.emergency_call) {
+        $("#alert-call-btn")
+            .attr("href", "tel:" + sev.emergency_call)
+            .html("&#x1F4DE; Call Emergency (" + sev.emergency_call + ")")
+            .show();
+    } else {
+        $("#alert-call-btn").hide();
+    }
+
+    // Show overlay as flex
+    $("#severity-overlay").css("display", "flex");
+}
+
+function closeSeverityAlert() {
+    $("#severity-overlay").hide();
+}
+
+// Close on overlay background click
+$(document).on("click", "#severity-overlay", function(e) {
+    if ($(e.target).is("#severity-overlay")) closeSeverityAlert();
+});
+
+function showTyping() {
+    $("#messageFormeight").append(
+        `<div class="d-flex justify-content-start mb-4" id="typing-row">
+           <div class="img_cont_msg">
+             <img src="https://cdn-icons-png.flaticon.com/512/387/387569.png"
+                  class="rounded-circle user_img_msg">
+           </div>
+           <div class="msg_cotainer typing-dots">
+             <span></span><span></span><span></span>
+           </div>
+         </div>`
+    );
+    scrollBottom();
+}
+
+function hideTyping() { $("#typing-row").remove(); }
+
+function scrollBottom() {
+    $("#messageFormeight").scrollTop($("#messageFormeight")[0].scrollHeight);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// TEXT SEND  (your original form submit handler, upgraded)
+// ════════════════════════════════════════════════════════════════════════════
+$(document).ready(function () {
+    $("#messageArea").on("submit", function (event) {
+        event.preventDefault();
+
+        if (selectedImageFile) { sendImageMessage(); return; }
+
+        const rawText = $("#text").val().trim();
+        if (!rawText) return;
+
+        $("#text").val("");
+        appendUser(rawText, null);
+        showTyping();
+
+        $.ajax({
+            url:  "/get",
+            type: "POST",
+            data: { msg: rawText, session_id: currentSessionId || "" },
+        }).done(function (data) {
+            hideTyping();
+            currentSessionId = data.session_id;
+            updateSessionLabel(data.session_id);
+            appendBot(data);
+            refreshSessionList();
+        }).fail(function () {
+            hideTyping();
+            appendBot({ reply: "⚠️ Server error. Please try again." });
+        });
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// IMAGE
+// ════════════════════════════════════════════════════════════════════════════
+function handleImageSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    selectedImageFile = file;
+    const url = URL.createObjectURL(file);
+    $("#img-thumb").attr("src", url);
+    $("#img-filename").text(file.name);
+    $("#img-preview-bar").css("display", "flex");
+}
+
+function removeImage() {
+    selectedImageFile = null;
+    $("#img-preview-bar").hide();
+    $("#image-input").val("");
+}
+
+function sendImageMessage() {
+    const caption  = $("#text").val().trim();
+    const imgUrl   = URL.createObjectURL(selectedImageFile);
+    const fileToSend = selectedImageFile;   // ← save ref BEFORE removeImage() clears it
+
+    $("#text").val("");
+    appendUser(caption || "📷 Image uploaded", imgUrl);
+    showTyping();
+
+    // Clear UI preview now (safe — fileToSend holds the ref)
+    removeImage();
+
+    const fd = new FormData();
+    fd.append("image", fileToSend);          // ← use saved ref
+    if (caption)          fd.append("message",    caption);
+    if (currentSessionId) fd.append("session_id", currentSessionId);
+
+    $.ajax({
+        url:         "/get/image",
+        type:        "POST",
+        data:        fd,
+        processData: false,
+        contentType: false,
+    }).done(function (data) {
+        hideTyping();
+        currentSessionId = data.session_id;
+        updateSessionLabel(data.session_id);
+        if (data.image_analysis) {
+            data.reply = "**Image Analysis:**\n" + data.image_analysis + "\n\n" + (data.reply || "");
+        }
+        appendBot(data);
+        refreshSessionList();
+    }).fail(function (xhr) {
+        hideTyping();
+        const msg = xhr.responseJSON ? xhr.responseJSON.error : "Image upload failed.";
+        appendBot({ reply: "⚠️ " + msg });
+    });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// VOICE
+// ════════════════════════════════════════════════════════════════════════════
+async function toggleRecording() {
+    if (isRecording) stopRecording(); else await startRecording();
+}
+
+async function startRecording() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks   = [];
+        mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+        mediaRecorder.onstop = sendVoice;
+        mediaRecorder.start();
+        isRecording = true;
+        $("#voice-btn").addClass("recording");
+        $("#voice-icon").removeClass("fa-microphone").addClass("fa-stop");
+        $("#rec-indicator").css("display", "flex");
+    } catch (e) {
+        alert("Microphone access denied. Please allow mic permissions.");
+    }
+}
+
+function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+        mediaRecorder.stream.getTracks().forEach(t => t.stop());
+    }
+    isRecording = false;
+    $("#voice-btn").removeClass("recording");
+    $("#voice-icon").removeClass("fa-stop").addClass("fa-microphone");
+    $("#rec-indicator").hide();
+}
+
+function sendVoice() {
+    const blob = new Blob(audioChunks, { type: "audio/webm" });
+    appendUser("🎤 Voice message…");
+    showTyping();
+
+    const fd = new FormData();
+    fd.append("audio", blob, "voice.webm");
+    if (currentSessionId) fd.append("session_id", currentSessionId);
+
+    $.ajax({
+        url:         "/get/voice",
+        type:        "POST",
+        data:        fd,
+        processData: false,
+        contentType: false,
+    }).done(function (data) {
+        hideTyping();
+        currentSessionId = data.session_id;
+        updateSessionLabel(data.session_id);
+        // Update voice placeholder with real transcript
+        $(".msg_cotainer_send").last().find("*").first().text(
+            data.transcript ? `🎤 "${data.transcript}"` : "🎤 Voice message"
+        );
+        appendBot(data);
+        refreshSessionList();
+    }).fail(function () {
+        hideTyping();
+        appendBot({ reply: "⚠️ Voice send failed. Please try again." });
+    });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SESSION HISTORY
+// ════════════════════════════════════════════════════════════════════════════
+function updateSessionLabel(sid) {
+    if (sid) {
+        $("#session-label").text("Session · " + sid.slice(0, 8) + "…");
+    }
+}
+
+function buildSessionItem(s, target) {
+    const date    = s.created_at ? new Date(s.created_at).toLocaleDateString() : "";
+    const preview = s.preview || "(empty)";
+    const active  = s.session_id === currentSessionId ? " active" : "";
+    return `<div class="session-item${active}" onclick="loadSession('${s.session_id}', '${target}')">
+              <div class="s-date">${date} · ${s.msg_count || 0} msgs</div>
+              <div class="s-preview">${preview}</div>
+            </div>`;
+}
+
+function refreshSessionList() {
+    $.get("/history", function (data) {
+        const sessions = (data.sessions || []).slice().reverse();
+        let html = sessions.map(s => buildSessionItem(s, "desktop")).join("");
+        $("#session-list").html(html || '<p style="color:rgba(255,255,255,.4);font-size:12px;">No past chats yet.</p>');
+        let mhtml = sessions.map(s => buildSessionItem(s, "mobile")).join("");
+        $("#mobile-session-list").html(mhtml || '<p style="color:rgba(255,255,255,.4);font-size:12px;">No past chats yet.</p>');
+    });
+}
+
+function loadSession(sessionId, _target) {
+    currentSessionId = sessionId;
+    updateSessionLabel(sessionId);
+    $("#mobile-sidebar").hide();
+
+    $.get("/history?session_id=" + sessionId, function (data) {
+        $("#messageFormeight").empty();
+        (data.messages || []).forEach(m => {
+            if (m.role === "user") {
+                appendUser(m.content, null);
+            } else {
+                appendBot({ reply: m.content });
+            }
+        });
+        refreshSessionList();
+    });
+}
+
+function startNewSession() {
+    currentSessionId = null;
+    $("#session-label").text("Ask me anything!");
+    $("#mobile-sidebar").hide();
+    $("#messageFormeight").html(
+        `<div class="d-flex justify-content-start mb-4">
+           <div class="img_cont_msg">
+             <img src="https://cdn-icons-png.flaticon.com/512/387/387569.png"
+                  class="rounded-circle user_img_msg">
+           </div>
+           <div class="msg_cotainer">
+             New conversation started. How can I help you? 🏥
+             <span class="msg_time">${timeStr()}</span>
+           </div>
+         </div>`
+    );
+}
+
+function toggleMobileSidebar() {
+    const sb = $("#mobile-sidebar");
+    if (sb.is(":visible")) {
+        sb.hide();
+    } else {
+        refreshSessionList();
+        sb.show();
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// CHECK-IN  (returning user progress follow-up)
+// ════════════════════════════════════════════════════════════════════════════
+let _checkinData = null;   // holds last disease/severity for reply submission
+
+function runCheckin() {
+    $.get("/checkin", function (data) {
+        if (!data.show) return;   // first time or too soon — do nothing
+
+        _checkinData = data;
+
+        // Insert check-in bubble BEFORE the welcome message
+        const bubble = `
+        <div class="d-flex justify-content-start mb-4" id="checkin-bubble-row">
+          <div class="img_cont_msg">
+            <img src="https://cdn-icons-png.flaticon.com/512/387/387569.png"
+                 class="rounded-circle user_img_msg">
+          </div>
+          <div class="msg_cotainer" style="max-width:85%;">
+            <div class="checkin-bubble">
+              ${md(data.question)}
+              <textarea class="checkin-input" id="checkin-text" rows="2"
+                        placeholder="e.g. I feel much better, the pain is gone…"></textarea>
+              <button class="checkin-send-btn" onclick="submitCheckin()">
+                ✓ Send Update
+              </button>
+            </div>
+            <span class="msg_time">${timeStr()}</span>
+          </div>
+        </div>`;
+
+        // Prepend before existing messages
+        $("#messageFormeight").prepend(bubble);
+
+        // Allow Enter to submit (Shift+Enter for newline)
+        $("#checkin-text").on("keydown", function (e) {
+            if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submitCheckin();
+            }
+        });
+    });
+}
+
+function submitCheckin() {
+    const reply = $("#checkin-text").val().trim();
+    if (!reply) return;
+
+    // Show user reply in chat
+    appendUser(reply, null);
+
+    // Remove check-in bubble
+    $("#checkin-bubble-row").remove();
+    showTyping();
+
+    const fd = new FormData();
+    fd.append("reply",         reply);
+    fd.append("last_disease",  _checkinData.last_disease);
+    fd.append("last_severity", _checkinData.last_severity);
+    fd.append("last_date",     _checkinData.last_date);
+    if (currentSessionId) fd.append("session_id", currentSessionId);
+
+    $.ajax({
+        url:         "/checkin/reply",
+        type:        "POST",
+        data:        fd,
+        processData: false,
+        contentType: false,
+    }).done(function (data) {
+        hideTyping();
+        currentSessionId = data.session_id;
+
+        // Build progress card
+        const card = `
+        <div class="progress-card"
+             style="background:${data.color}22; border:1px solid ${data.color}55;">
+          <div style="font-size:18px;margin-bottom:6px;">
+            ${data.icon} <b style="color:${data.color}">${data.label}</b>
+          </div>
+          <div style="margin-bottom:6px;">${md(data.assessment)}</div>
+          <div style="font-size:12px;opacity:.75;">${data.advice}</div>
+        </div>`;
+
+        // Append as a bot message with the progress card
+        $("#messageFormeight").append(`
+        <div class="d-flex justify-content-start mb-4">
+          <div class="img_cont_msg">
+            <img src="https://cdn-icons-png.flaticon.com/512/387/387569.png"
+                 class="rounded-circle user_img_msg">
+          </div>
+          <div class="msg_cotainer" style="max-width:85%;">
+            ${card}
+            <div style="margin-top:8px;font-size:12px;opacity:.7;">
+              Feel free to describe any new symptoms or ask me anything! 🏥
+            </div>
+            <span class="msg_time">${timeStr()}</span>
+          </div>
+        </div>`);
+
+        scrollBottom();
+        refreshSessionList();
+        _checkinData = null;
+    }).fail(function () {
+        hideTyping();
+        appendBot({ reply: "⚠️ Could not process your check-in. Please try again." });
+    });
+}
+
+// Load sessions + run check-in on page load
+$(document).ready(function () {
+    refreshSessionList();
+    runCheckin();
+});
+</script>
+
+</body>
 </html>
