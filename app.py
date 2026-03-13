@@ -20,7 +20,7 @@ from operator import itemgetter
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from helper import get_embeddings
-from prompt import system_prompt, nutrition_prompt_template
+from prompt import system_prompt, nutrition_prompt_template, symptom_extraction_prompt, fallback_disease_prompt
 
 load_dotenv()
 
@@ -116,11 +116,12 @@ chat_model = ChatGroq(
     max_retries=2,
 )
 
-# ── Chain A: Disease identification ──────────────────────────────────────────
+# ── Chain A: Disease identification (RAG-grounded) ───────────────────────────
 disease_chain = (
     {
-        "context": itemgetter("input") | retriever_general,
-        "input":   itemgetter("input"),
+        "context":         itemgetter("input") | retriever_general,
+        "input":           itemgetter("input"),
+        "symptom_context": itemgetter("symptom_context"),
     }
     | ChatPromptTemplate.from_messages([
         ("system", system_prompt),
@@ -130,15 +131,31 @@ disease_chain = (
     | StrOutputParser()
 )
 
+# ── Chain A fallback: pure LLM reasoning (no RAG, used when RAG returns general) ──
+fallback_disease_chain = (
+    ChatPromptTemplate.from_messages([
+        ("system", fallback_disease_prompt),
+        ("human", "Please give your best clinical assessment.")
+    ])
+    | chat_model
+    | StrOutputParser()
+)
+
 # ── Chain B: Nutrition recommendation ────────────────────────────────────────
+# Richer retrieval query — "disease nutritional requirements dietary guidelines"
+# gives far better Pinecone results than just the disease name
+def _nutrition_query(inputs: dict) -> str:
+    return f"{inputs['disease']} nutritional requirements dietary guidelines management"
+
 nutrition_chain = (
     {
-        "context": itemgetter("disease") | retriever_nutrition,
-        "disease": itemgetter("disease"),
+        "context":      _nutrition_query | retriever_nutrition,
+        "disease":      itemgetter("disease"),
+        "disease_info": itemgetter("disease_info"),
     }
     | ChatPromptTemplate.from_messages([
         ("system", nutrition_prompt_template),
-        ("human", "Disease: {disease}\n\nProvide the daily nutritional requirements.")
+        ("human", "Patient disease: {disease}\n\nProvide the personalised daily nutritional requirements.")
     ])
     | chat_model
     | StrOutputParser()
@@ -213,79 +230,138 @@ def _history_ctx(msgs: list, max_turns: int = 6) -> str:
 # SEVERITY DETECTION
 # ════════════════════════════════════════════════════════════════════════════
 
-# Conditions that always trigger CRITICAL alert regardless of LLM
+# Conditions that always trigger CRITICAL — must be NAMED in disease or query
+# These are specific diagnosed conditions, NOT generic symptoms
 CRITICAL_CONDITIONS = {
-    # Cardiac
     "heart attack", "myocardial infarction", "cardiac arrest", "heart failure",
     "acute coronary syndrome", "ventricular fibrillation", "cardiac tamponade",
-    # Neurological
     "stroke", "brain hemorrhage", "brain bleed", "intracranial hemorrhage",
-    "subarachnoid hemorrhage", "transient ischemic attack", "tia",
-    "status epilepticus", "meningitis", "encephalitis",
-    # Respiratory
+    "subarachnoid hemorrhage", "status epilepticus", "meningitis", "encephalitis",
     "pulmonary embolism", "tension pneumothorax", "respiratory failure",
-    "severe asthma attack", "epiglottitis",
-    # Shock / Infection
     "anaphylaxis", "anaphylactic shock", "sepsis", "septic shock",
-    "toxic shock syndrome",
-    # Abdominal
-    "appendicitis", "bowel perforation", "ruptured spleen", "aortic aneurysm",
-    "aortic dissection", "ectopic pregnancy", "ruptured ectopic",
-    # Endocrine
+    "toxic shock syndrome", "bowel perforation", "aortic aneurysm",
+    "aortic dissection", "ruptured ectopic", "eclampsia",
     "diabetic ketoacidosis", "dka", "hypoglycemic coma", "thyroid storm",
-    "addisonian crisis", "adrenal crisis",
-    # Trauma / Other
-    "spinal injury", "severe burn", "drowning", "poisoning", "overdose",
+    "adrenal crisis", "spinal injury", "drowning",
     "internal bleeding", "severe hemorrhage", "hypertensive crisis",
-    "eclampsia", "pre-eclampsia", "placental abruption",
 }
 
-# Symptoms in the user query that alone warrant urgent/critical attention
+# Symptoms that alone in the patient's OWN WORDS warrant URGENT — must be explicit
 URGENT_SYMPTOMS = {
-    # Chest
+    # Chest — only specific descriptions
     "chest pain", "chest tightness", "chest pressure", "crushing chest",
-    "radiating to arm", "radiating to jaw",
-    # Breathing
-    "can't breathe", "cannot breathe", "difficulty breathing",
-    "shortness of breath", "breathless", "coughing blood", "blood in sputum",
-    # Neuro
+    "pain radiating to arm", "pain radiating to jaw",
+    # Breathing — only acute
+    "can't breathe", "cannot breathe", "unable to breathe",
+    "difficulty breathing", "coughing blood", "blood in sputum",
+    # Neuro — only sudden onset
     "sudden severe headache", "worst headache of my life", "thunderclap headache",
     "sudden confusion", "slurred speech", "face drooping", "arm weakness",
-    "sudden numbness", "sudden vision loss", "double vision",
-    "loss of consciousness", "unconscious", "fainted", "fainting",
-    "seizure", "convulsion", "not responding",
+    "sudden numbness", "sudden vision loss",
+    "loss of consciousness", "unconscious", "not responding",
+    "seizure", "convulsion",
     # Bleeding
     "vomiting blood", "blood in stool", "rectal bleeding",
     "severe bleeding", "won't stop bleeding", "coughing up blood",
-    # Allergic
+    # Allergic — acute
     "throat swelling", "tongue swelling", "lips swelling",
-    "allergic reaction", "hives all over",
-    # Vitals
-    "fever above 103", "fever above 104", "high fever chills",
-    "bluish lips", "blue lips", "cold sweat", "clammy skin",
-    "heart racing", "rapid heartbeat", "palpitations",
-    # Abdomen
-    "severe abdominal pain", "rigid abdomen", "cannot urinate",
+    # Vitals — only extreme values explicitly stated
+    "fever above 104", "fever 105", "fever 106",
+    "bluish lips", "blue lips",
     # Misc
-    "overdose", "poisoned", "severe burn", "not breathing",
-    "baby not moving", "labour pain",
+    "overdose", "poisoned", "not breathing",
+    "baby not moving",
 }
 
-def _assess_severity(query: str, disease: str, disease_info: str) -> dict:
+# Mild/common conditions — always cap at MODERATE regardless of LLM
+MILD_CONDITIONS = {
+    "common cold", "influenza", "viral fever", "flu",
+    "upper respiratory tract infection", "urti",
+    "mild fever", "low grade fever",
+    "indigestion", "acid reflux", "heartburn",
+    "mild headache", "tension headache",
+    "mild gastroenteritis", "stomach bug",
+    "mild allergic reaction", "hay fever",
+    "minor cut", "bruise", "sprain",
+    "mild anemia", "fatigue",
+}
+
+def _assess_severity(query: str, disease: str, disease_info: str,
+                     symptom_data: dict = None) -> dict:
     """
-    3-step severity assessment:
-    Step 1 — instant keyword match (fast, conservative — errs toward higher severity)
-    Step 2 — LLM triage with strict prompt
-    Step 3 — take the WORSE of the two
+    3-step severity assessment with structured symptom context.
+    symptom_data: extracted dict from _extract_symptoms()
     """
+    sx                 = symptom_data or {}
     query_lower        = query.lower()
     disease_lower      = disease.lower()
     disease_info_lower = disease_info.lower()
 
-    # ── Step 1: Instant keyword check ───────────────────────────────────────
+    # ── Pull structured context ──────────────────────────────────────────────
+    duration    = sx.get("duration", "unknown").lower()
+    age_raw     = sx.get("age", "not mentioned").lower()
+    worsening   = sx.get("worsening", "unknown").lower()
+    temperature = sx.get("temperature", "not mentioned").lower()
+    sev_words   = [w.lower() for w in sx.get("severity_words", [])]
+
+    # Parse age into a number if possible
+    age_num = None
+    age_match = re.search(r"\b(\d+)\b", age_raw)
+    if age_match:
+        age_num = int(age_match.group(1))
+
+    # Parse temperature to float
+    temp_val = None
+    temp_match = re.search(r"(\d+\.?\d*)\s*[°]?\s*[fF]", temperature)
+    if temp_match:
+        temp_val = float(temp_match.group(1))
+    temp_c_match = re.search(r"(\d+\.?\d*)\s*[°]?\s*[cC]", temperature)
+    if temp_c_match:
+        temp_val = float(temp_c_match.group(1)) * 9/5 + 32  # convert to F
+
+    # ── Pre-check: structured escalation rules ───────────────────────────────
+    # High fever: >104°F always URGENT; >105°F = CRITICAL; infant with >100.4°F = URGENT
+    structured_escalation = None
+    if temp_val is not None:
+        if temp_val >= 105:
+            structured_escalation = "CRITICAL"
+            print(f"🌡️  Temp {temp_val:.1f}°F ≥ 105 → CRITICAL")
+        elif temp_val >= 104:
+            structured_escalation = "URGENT"
+            print(f"🌡️  Temp {temp_val:.1f}°F ≥ 104 → URGENT")
+        elif temp_val >= 103 and age_num is not None and age_num < 2:
+            structured_escalation = "URGENT"
+            print(f"🌡️  Temp {temp_val:.1f}°F in infant → URGENT")
+
+    # Long duration + worsening → at least URGENT
+    duration_days = None
+    dur_match = re.search(r"(\d+)\s*day", duration)
+    if dur_match:
+        duration_days = int(dur_match.group(1))
+    if duration_days and duration_days >= 7 and worsening == "yes":
+        if not structured_escalation:
+            structured_escalation = "URGENT"
+            print(f"📅 {duration_days} days + worsening → URGENT")
+
+    # Very young (<2) or elderly (>70) with any infection → minimum MODERATE
+    if age_num is not None and not structured_escalation:
+        if age_num < 2 or age_num > 70:
+            structured_escalation = "MODERATE"
+            print(f"👤 Age {age_num} → minimum MODERATE")
+
+    # ── Step 1: Keyword check ─────────────────────────────────────────────────
     matched_critical = next(
         (c for c in CRITICAL_CONDITIONS
-         if c in disease_lower or c in disease_info_lower or c in query_lower), None)
+         if c in disease_lower or c in disease_info_lower), None)
+
+    # Also check query but only for very explicit critical phrases
+    if not matched_critical:
+        critical_query_phrases = {
+            "heart attack", "stroke", "overdose", "not breathing",
+            "poisoned", "anaphylaxis", "seizure", "convulsion",
+        }
+        matched_critical = next(
+            (c for c in critical_query_phrases if c in query_lower), None)
 
     matched_urgent = next(
         (s for s in URGENT_SYMPTOMS if s in query_lower), None)
@@ -303,26 +379,35 @@ def _assess_severity(query: str, disease: str, disease_info: str) -> dict:
         ("system",
          "You are a senior emergency medicine physician doing triage.\n"
          "Classify the severity of this condition as exactly ONE of these levels:\n\n"
-         "CRITICAL — life-threatening, requires emergency room or ambulance IMMEDIATELY.\n"
-         "           Examples: heart attack, stroke, anaphylaxis, sepsis, overdose,\n"
-         "           severe bleeding, difficulty breathing, loss of consciousness.\n"
-         "           When in doubt between CRITICAL and URGENT, choose CRITICAL.\n\n"
-         "URGENT   — serious, needs a doctor or urgent care TODAY. Cannot wait.\n"
-         "           Examples: high fever, severe pain, suspected fracture,\n"
-         "           worsening infection, uncontrolled vomiting/diarrhea.\n\n"
-         "MODERATE — needs a doctor visit within 2-3 days.\n"
-         "           Examples: mild infection, rash, persistent cough, UTI.\n\n"
-         "MILD     — can safely be managed at home with rest and OTC medication.\n"
-         "           Examples: common cold, minor cut, mild headache, indigestion.\n\n"
-         "IMPORTANT: Always err on the side of caution. If there is ANY doubt, "
-         "classify one level HIGHER than you think. A wrong MILD when it is CRITICAL "
-         "can cost a life.\n\n"
-         "Respond in EXACTLY this format (no extra text):\n"
+         "CRITICAL — immediately life-threatening. Only use for:\n"
+         "  Heart attack, stroke, severe anaphylaxis, septic shock, overdose,\n"
+         "  uncontrolled severe bleeding, complete respiratory failure,\n"
+         "  loss of consciousness with unknown cause.\n\n"
+         "URGENT — needs a doctor or clinic TODAY but is NOT immediately life-threatening.\n"
+         "  Examples: high fever (103°F+) in adults, moderate infection, suspected fracture,\n"
+         "  persistent vomiting/diarrhea, worsening symptoms over 2-3 days.\n\n"
+         "MODERATE — needs a doctor visit within 2-3 days. Not urgent.\n"
+         "  Examples: low-grade fever, mild infection, UTI, rash, persistent cough,\n"
+         "  flu/viral fever with manageable symptoms, mild headache.\n\n"
+         "MILD — can safely be managed at home.\n"
+         "  Examples: common cold, minor cut, indigestion, mild fatigue, "
+         "  headache with no red flags, 1-2 day fever below 103°F.\n\n"
+         "PATIENT CONTEXT:\n"
+         "  Duration: {duration} | Age: {age} | Worsening: {worsening}\n"
+         "  Temperature: {temperature}\n\n"
+         "CALIBRATION RULES:\n"
+         "- Flu, viral fever, common cold → MILD or MODERATE only\n"
+         "- Fever below 103°F, no red flags → MILD or MODERATE\n"
+         "- Do NOT use CRITICAL unless objectively life-threatening\n"
+         "- When unsure between MILD and MODERATE → choose MODERATE\n"
+         "- When unsure between MODERATE and URGENT → choose MODERATE\n"
+         "- Worsening symptoms for 7+ days → escalate to URGENT\n\n"
+         "Respond in EXACTLY this format:\n"
          "SEVERITY: <CRITICAL|URGENT|MODERATE|MILD>\n"
          "REASON: <one sentence clinical reason>\n"
-         "ACTION: <one sentence — what should the patient do RIGHT NOW>"),
+         "ACTION: <one sentence — what the patient should do right now>"),
         ("human",
-         "Disease identified: {disease}\n\n"
+         "Disease: {disease}\n"
          "Clinical description:\n{disease_info}\n\n"
          "Patient's own words: {query}")
     ])
@@ -332,33 +417,50 @@ def _assess_severity(query: str, disease: str, disease_info: str) -> dict:
     try:
         llm_resp = severity_chain.invoke({
             "disease":      disease,
-            "disease_info": disease_info[:800],
+            "disease_info": disease_info[:600],
             "query":        query[:300],
+            "duration":     duration,
+            "age":          age_raw,
+            "worsening":    worsening,
+            "temperature":  temperature,
         })
         sev_match    = re.search(r"SEVERITY:\s*(CRITICAL|URGENT|MODERATE|MILD)",
                                  llm_resp, re.IGNORECASE)
         reason_match = re.search(r"REASON:\s*(.+)",  llm_resp, re.IGNORECASE)
         action_match = re.search(r"ACTION:\s*(.+)",  llm_resp, re.IGNORECASE)
 
-        llm_level  = sev_match.group(1).upper()   if sev_match    else "URGENT"
+        llm_level  = sev_match.group(1).upper()   if sev_match    else "MODERATE"
         llm_reason = reason_match.group(1).strip() if reason_match else ""
         llm_action = action_match.group(1).strip() if action_match else ""
         print(f"🤖 LLM severity: {llm_level} — {llm_reason}")
 
     except Exception as e:
-        print(f"⚠️  Severity LLM error: {e} — defaulting to URGENT")
-        llm_level  = "URGENT"   # safe default on error
+        print(f"⚠️  Severity LLM error: {e} — defaulting to MODERATE")
+        llm_level  = "MODERATE"
         llm_reason = ""
         llm_action = ""
 
-    # ── Step 3: Take the more severe of instant vs LLM ──────────────────────
+    # ── Step 3: Final level ──────────────────────────────────────────────────
     order = {"CRITICAL": 4, "URGENT": 3, "MODERATE": 2, "MILD": 1}
-    final_level = max(
-        instant_level or llm_level,
-        llm_level,
-        key=lambda x: order.get(x, 0)
-    )
-    print(f"✅ Final severity: {final_level}")
+
+    # Cap mild known diseases at MODERATE
+    is_mild_disease = any(m in disease_lower for m in MILD_CONDITIONS)
+    if is_mild_disease:
+        # Still respect structured escalation (e.g. infant with flu = MODERATE at least)
+        instant_level = None
+        llm_level = min(llm_level, "MODERATE", key=lambda x: order.get(x, 0))
+        print(f"🟢 Mild disease — capped at MODERATE")
+
+    # Take worst of: structured rules, keyword match, LLM
+    candidates = [llm_level]
+    if instant_level:
+        candidates.append(instant_level)
+    if structured_escalation:
+        candidates.append(structured_escalation)
+
+    final_level = max(candidates, key=lambda x: order.get(x, 0))
+    print(f"✅ Final severity: {final_level} "
+          f"(LLM={llm_level}, keyword={instant_level}, structured={structured_escalation})")
 
     # ── Build alert payload ──────────────────────────────────────────────────
     alert_config = {
@@ -425,15 +527,123 @@ def _extract_disease(text: str) -> str:
     m = re.search(r"IDENTIFIED_DISEASE:\s*(.+)", text, re.IGNORECASE)
     return m.group(1).strip() if m else "general"
 
+def _extract_symptoms(query: str) -> dict:
+    """
+    Step 0: Extract structured symptom data from raw patient query.
+    Returns a dict with symptoms, duration, severity_words, temperature,
+    location, onset, age, existing_conditions, worsening.
+    Falls back to empty defaults on any failure.
+    """
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", symptom_extraction_prompt),
+        ("human", "{query}")
+    ])
+    chain = prompt | chat_model | StrOutputParser()
+    try:
+        raw = chain.invoke({"query": query})
+        # strip markdown fences if present
+        clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+        return json.loads(clean)
+    except Exception as e:
+        print(f"⚠️  Symptom extraction failed: {e}")
+        return {
+            "symptoms": [], "duration": "unknown",
+            "severity_words": [], "temperature": "not mentioned",
+            "location": "not mentioned", "onset": "unknown",
+            "age": "not mentioned", "existing_conditions": [],
+            "worsening": "unknown"
+        }
+
+
+def _format_symptom_context(sx: dict) -> str:
+    """Format extracted symptoms as a readable summary for the disease chain."""
+    lines = [
+        f"Symptoms     : {', '.join(sx.get('symptoms', [])) or 'not specified'}",
+        f"Duration     : {sx.get('duration', 'unknown')}",
+        f"Temperature  : {sx.get('temperature', 'not mentioned')}",
+        f"Severity     : {', '.join(sx.get('severity_words', [])) or 'not specified'}",
+        f"Location     : {sx.get('location', 'not mentioned')}",
+        f"Onset        : {sx.get('onset', 'unknown')}",
+        f"Age          : {sx.get('age', 'not mentioned')}",
+        f"Conditions   : {', '.join(sx.get('existing_conditions', [])) or 'none mentioned'}",
+        f"Worsening    : {sx.get('worsening', 'unknown')}",
+    ]
+    return "\n".join(lines)
+
+
 def run_pipeline(query: str) -> dict:
-    disease_raw        = disease_chain.invoke({"input": query})
+    """
+    Full pipeline with 3 robustness upgrades:
+
+    Step 0 — Symptom extraction: parse structured fields from raw query
+    Step 1 — RAG disease chain: retrieve + identify with structured context
+    Step 2 — Fallback disease chain: pure LLM reasoning if RAG returns 'general'
+    Step 3 — Nutrition chain: richer retrieval query + disease_info context
+    Step 4 — Severity: structured context (age, duration, worsening) passed in
+    """
+
+    # ── Step 0: Extract structured symptoms ─────────────────────────────────
+    print("🔬 Step 0: Extracting structured symptoms…")
+    sx             = _extract_symptoms(query)
+    symptom_ctx    = _format_symptom_context(sx)
+    print(f"   Symptoms: {sx.get('symptoms')} | Duration: {sx.get('duration')} | Temp: {sx.get('temperature')}")
+
+    # ── Step 1: RAG-grounded disease chain ───────────────────────────────────
+    print("🔍 Step 1: RAG disease identification…")
+    disease_raw        = disease_chain.invoke({
+        "input":           query,
+        "symptom_context": symptom_ctx,
+    })
     identified_disease = _extract_disease(disease_raw)
     clean_disease      = re.sub(
         r"\nIDENTIFIED_DISEASE:.*", "", disease_raw, flags=re.IGNORECASE).strip()
-    nutrition_resp = nutrition_chain.invoke({"disease": identified_disease})
+    print(f"   RAG identified: {identified_disease}")
 
-    # ── Severity assessment ──────────────────────────────────────────────────
-    severity = _assess_severity(query, identified_disease, clean_disease)
+    # ── Step 2: Fallback — pure LLM reasoning if RAG returned general ────────
+    used_fallback = False
+    if identified_disease.lower() in ("general", "unknown", ""):
+        print("🔄 Step 2: RAG returned general — running LLM fallback…")
+        try:
+            fallback_raw       = fallback_disease_chain.invoke({
+                "query":           query,
+                "symptom_context": symptom_ctx,
+            })
+            fallback_disease   = _extract_disease(fallback_raw)
+            fallback_clean     = re.sub(
+                r"\nIDENTIFIED_DISEASE:.*", "", fallback_raw, flags=re.IGNORECASE).strip()
+
+            if fallback_disease.lower() not in ("general", "unknown", ""):
+                identified_disease = fallback_disease
+                clean_disease      = fallback_clean
+                used_fallback      = True
+                print(f"   Fallback identified: {identified_disease}")
+            else:
+                print("   Fallback also returned general — keeping ask-for-more")
+        except Exception as e:
+            print(f"⚠️  Fallback chain error: {e}")
+
+    # ── Step 3: Nutrition chain ───────────────────────────────────────────────
+    if identified_disease.lower() in ("general", "unknown", ""):
+        nutrition_resp = (
+            "_I need a bit more information to give you an accurate nutrition plan. "
+            "Could you share: how long you've had these symptoms, your age, "
+            "and any existing health conditions or medications?_"
+        )
+    else:
+        print(f"🥗 Step 3: Nutrition for {identified_disease}…")
+        nutrition_resp = nutrition_chain.invoke({
+            "disease":      identified_disease,
+            "disease_info": clean_disease[:600],
+        })
+
+    # ── Step 4: Severity — pass structured context ───────────────────────────
+    print("🚦 Step 4: Severity assessment…")
+    severity = _assess_severity(
+        query          = query,
+        disease        = identified_disease,
+        disease_info   = clean_disease,
+        symptom_data   = sx,           # ← structured context now passed in
+    )
 
     return {
         "identified_disease": identified_disease,
@@ -441,6 +651,7 @@ def run_pipeline(query: str) -> dict:
         "nutrition_plan":     nutrition_resp,
         "reply":              f"{clean_disease}\n\n{nutrition_resp}",
         "severity":           severity,
+        "used_fallback":      used_fallback,
     }
 
 

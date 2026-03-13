@@ -9,14 +9,58 @@ personalised daily nutrition plans. Built with LangChain, Pinecone, Groq, and Fl
 
 | Feature | Detail |
 |---|---|
-| 🧠 Dual RAG chains | Chain A: disease identification · Chain B: nutrition table |
-| 📊 Nutrition plan | 7-nutrient daily % table (Carbs, Protein, Fat, Vitamins, Minerals, Water, Fiber) |
-| 🚨 Severity alerts | 3-step triage: keyword match → LLM → worst-case wins (CRITICAL/URGENT/MODERATE/MILD) |
-| 📷 Prescription reader | 3-layer OCR: Tesseract → Groq Vision → RAG cross-check |
+| 🔬 Symptom extraction | Step 0: LLM parses query into structured JSON (symptoms, duration, temp, age, onset, worsening) |
+| 🧠 Two-pass disease chain | Chain A (RAG) → fallback pure-LLM if RAG returns `general` |
+| 📊 Personalised nutrition | 7-nutrient table with ↑↓ vs normal — values specific to the identified disease |
+| 🚨 Smart severity triage | Structured rules (age/temp/duration) + keyword match + LLM → worst-case wins |
+| 📷 Prescription reader | 3-layer OCR: Tesseract → Groq Vision (llama-4-scout) → RAG cross-check |
 | 🎙️ Voice input | Groq Whisper transcription |
 | 💾 Chat history | SQLite per-user sessions (no extra DB server needed) |
 | 🔄 Recovery check-in | Auto check-in for returning users after 3+ days |
 | 📈 Progress tracking | RECOVERING / STABLE / WORSENING / NEW_SYMPTOMS |
+
+---
+
+## 🔁 Pipeline Architecture
+
+```
+User Query (Text / Voice / Image)
+         |
+         v  Step 0 -- _extract_symptoms()
+              LLM -> JSON { symptoms, duration, temp, age, worsening, ... }
+         |
+         v  Step 1 -- disease_chain  (RAG, namespace: general)
+              symptom_context + retrieved chunks -> Llama-3.3-70B
+              -> IDENTIFIED_DISEASE: <name>
+         |
+         +-- if = "general" --> Step 2 -- fallback_disease_chain
+         |                                Pure LLM, no Pinecone
+         v
+         Step 3 -- nutrition_chain  (RAG, namespace: nutrition)
+              Richer query: "disease + nutritional requirements dietary guidelines"
+              + disease_info from Step 1/2 -> 7-row table (up/down vs normal)
+         |
+         v  Step 4 -- _assess_severity()
+              Structured rules: temp >= 104F -> URGENT, >= 105F -> CRITICAL
+                                age < 2 or > 70 -> minimum MODERATE
+                                7+ days + worsening -> URGENT
+              Keyword match:   CRITICAL_CONDITIONS, URGENT_SYMPTOMS sets
+              LLM triage:      balanced prompt with calibration rules
+              Final =          worst of all three
+```
+
+### Nutrition Table -- up/down Symbols
+
+Each row compares against a healthy adult baseline:
+
+| Symbol | Meaning | Example |
+|---|---|---|
+| `up` | Higher than normal | Protein up for TB -- tissue repair |
+| `down` | Lower than normal | Carbs down for Diabetes -- glucose control |
+| `Restrict` | Severely limited | Potassium for CKD |
+| (no symbol) | At normal level | Fiber for most infections |
+
+Normal baseline: Carbs 45-65%, Protein 10-35%, Fat 20-35%, Water 2.7 L/day, Fiber 25-30 g/day.
 
 ---
 
