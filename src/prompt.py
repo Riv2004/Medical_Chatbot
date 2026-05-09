@@ -70,7 +70,36 @@ fallback_disease_prompt = (
     "IDENTIFIED_DISEASE: <most likely condition name>"
 )
 
-# ── Chain B: Nutrition recommendation ────────────────────────────────────────
+# ── Chain C: Home care / exercise plan ───────────────────────────────────────
+# Only shown to user for MILD and MODERATE severity.
+# CRITICAL / URGENT skip this — emergency modal takes priority.
+home_care_prompt = (
+    "You are a clinical physiotherapist and home-care specialist.\n"
+    "A patient has been preliminarily identified with: {disease}\n"
+    "Severity level: {severity}\n\n"
+    "Clinical context:\n{disease_info}\n\n"
+    "Generate a structured home management plan the patient can start TODAY "
+    "before seeing a doctor. This is NOT a replacement for medical care — "
+    "it is a first-step support plan.\n\n"
+    "STRICT RULES:\n"
+    "1. Tailor EVERY item specifically to {disease} — no generic advice.\n"
+    "2. For MILD: give a full home care + light activity plan.\n"
+    "3. For MODERATE: focus on rest + monitoring + when to escalate.\n"
+    "4. Output ONLY the markdown table below — no bullets, no extra text.\n"
+    "5. Keep each cell concise (max 12 words).\n"
+    "6. The 'Why' column must link directly to {disease} physiology.\n\n"
+    "| # | Category | Action | Duration / Frequency | Why it helps |\n"
+    "|---|----------|--------|----------------------|--------------|\n"
+    "| 1 | Rest | ...    | ...                  | ...          |\n"
+    "| 2 | Hydration | ... | ...                  | ...          |\n"
+    "| 3 | Activity | ...  | ...                  | ...          |\n"
+    "| 4 | Monitoring | .. | ...                  | ...          |\n"
+    "| 5 | Avoid | ...     | ...                  | ...          |\n"
+    "| 6 | Safe OTC | ...  | ...                  | ...          |\n"
+    "| 7 | Warning sign | . | Seek care if occurs  | ...          |\n"
+)
+
+# ── Chain B: Nutrition recommendation (silent — stored for friend's system) ───
 nutrition_prompt_template = (
     "You are a senior clinical dietitian. A patient has been diagnosed with: {disease}\n\n"
     "Clinical context about this condition:\n{disease_info}\n\n"
@@ -95,3 +124,104 @@ nutrition_prompt_template = (
     "| Fiber         | XX g/day (↑/↓ vs normal)         | ...                      |\n\n"
     "Retrieved nutrition knowledge:\n{context}"
 )
+
+# ── Food suggestion prompt — for friend's meal planning system ────────────────
+# Inputs: disease, region, carbs_g, protein_g, fat_g, fiber_g, water_l,
+#         restrictions (disease-specific avoid list)
+# Output: JSON with breakfast, lunch, dinner — each with foods + gram quantities
+food_suggestion_prompt = (
+    "You are a clinical nutritionist and regional food expert.\n"
+    "A patient has been diagnosed with: {disease}\n"
+    "Their location / cuisine region: {region}\n\n"
+
+    "DAILY MACRO TARGETS (from medical assessment):\n"
+    "  Carbohydrates : {carbs_g} g\n"
+    "  Protein       : {protein_g} g\n"
+    "  Fat           : {fat_g} g\n"
+    "  Fiber         : {fiber_g} g\n"
+    "  Water         : {water_l} L\n\n"
+
+    "DISEASE-SPECIFIC RESTRICTIONS for {disease}:\n"
+    "{restrictions}\n\n"
+
+    "RULES:\n"
+    "1. Suggest ONLY foods commonly available in {region} cuisine.\n"
+    "2. Every food must respect ALL restrictions for {disease}.\n"
+    "3. Split the daily macros across 3 meals:\n"
+    "   Breakfast 25% | Lunch 40% | Dinner 35%\n"
+    "4. For each food item include exact gram quantity.\n"
+    "5. Each meal must hit its macro target within 10%.\n"
+    "6. Prefer whole, minimally processed foods.\n"
+    "7. Mark any item that specifically HELPS {disease} recovery with (*).\n"
+    "8. Respond ONLY in this exact JSON format — no extra text:\n\n"
+    "{{\n"
+    '  "disease": "{disease}",\n'
+    '  "region": "{region}",\n'
+    '  "daily_targets": {{\n'
+    '    "carbs_g": {carbs_g}, "protein_g": {protein_g},\n'
+    '    "fat_g": {fat_g}, "fiber_g": {fiber_g}, "water_l": {water_l}\n'
+    "  }},\n"
+    '  "meal_plan": {{\n'
+    '    "breakfast": {{\n'
+    '      "target_calories": "<25% of daily>",\n'
+    '      "items": [\n'
+    '        {{"food": "<name>", "quantity_g": <int>, "carbs_g": <int>,\n'
+    '          "protein_g": <int>, "fat_g": <int>, "note": "<why good for disease>"}}\n'
+    "      ]\n"
+    "    }},\n"
+    '    "lunch": {{ ... }},\n'
+    '    "dinner": {{ ... }}\n'
+    "  }},\n"
+    '  "foods_to_avoid": ["<food1>", "<food2>"],\n'
+    '  "hydration_note": "<disease-specific hydration tip>"\n'
+    "}}"
+)
+
+# ── Disease restriction map — used to build {restrictions} field ──────────────
+# Injected into food_suggestion_prompt so LLM knows hard dietary limits.
+DISEASE_RESTRICTIONS = {
+    "diabetes mellitus": (
+        "No refined sugar, white rice, white bread, sugary drinks, fruit juices. "
+        "Low glycaemic index foods only. Limit total carbs to complex sources."
+    ),
+    "hypertension": (
+        "No added salt, pickles, processed/packaged foods, red meat, alcohol. "
+        "Limit sodium to <1500 mg/day. Prefer potassium-rich foods."
+    ),
+    "tuberculosis": (
+        "No alcohol. Avoid raw eggs. High calorie, high protein diet required. "
+        "Vitamin B6 supplementation needed (isoniazid depletes it)."
+    ),
+    "anemia": (
+        "Avoid tea/coffee with meals (inhibit iron absorption). "
+        "Pair iron-rich foods with Vitamin C sources. No calcium supplements at mealtime."
+    ),
+    "chronic kidney disease": (
+        "Strict potassium restriction. Limit phosphorus (dairy, nuts, seeds). "
+        "Low protein unless on dialysis. Limit fluid intake. No salt substitutes."
+    ),
+    "gastroenteritis": (
+        "No spicy food, fried food, dairy, raw vegetables, alcohol, caffeine. "
+        "BRAT diet preferred (Banana, Rice, Applesauce, Toast). Small frequent meals."
+    ),
+    "influenza": (
+        "No alcohol. Avoid cold foods and drinks. No heavy fried meals. "
+        "Warm, easily digestible foods preferred."
+    ),
+    "hepatitis": (
+        "No alcohol (strictly). No fatty or fried food. Low fat diet. "
+        "No raw shellfish. Small frequent meals. Avoid paracetamol."
+    ),
+    "arthritis": (
+        "Avoid red meat, processed foods, refined carbs, sugar, alcohol. "
+        "Anti-inflammatory foods preferred (turmeric, ginger, omega-3 rich fish)."
+    ),
+    "meningitis": (
+        "No alcohol. Easy-to-digest foods. High fluid intake. "
+        "Avoid heavy meals during acute phase."
+    ),
+    "default": (
+        "Avoid heavily processed foods, excess sugar, excess salt, and alcohol. "
+        "Prefer whole foods appropriate for the condition."
+    ),
+}

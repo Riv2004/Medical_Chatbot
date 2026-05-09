@@ -19,8 +19,11 @@ from operator import itemgetter
 
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
-from helper import get_embeddings
-from prompt import system_prompt, nutrition_prompt_template, symptom_extraction_prompt, fallback_disease_prompt
+from src.helper import get_embeddings
+from src.prompt import (system_prompt, nutrition_prompt_template,
+                        symptom_extraction_prompt, fallback_disease_prompt,
+                        home_care_prompt, food_suggestion_prompt,
+                        DISEASE_RESTRICTIONS)
 
 load_dotenv()
 
@@ -30,12 +33,11 @@ tesseract_cmd = os.getenv("TESSERACT_CMD")
 if tesseract_cmd:
     pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-GROQ_API_KEY     = os.getenv("GROQ_API_KEY")
-INDEX_NAME       = os.getenv("PINECONE_INDEX_NAME", "medical-chatbot")
-SECRET_KEY       = os.getenv("SECRET_KEY", "dev-secret-change-in-prod")
-DB_PATH = os.getenv("SQLITE_DB_PATH", "chat_history.db")
-
+PINECONE_API_KEY    = os.getenv("PINECONE_API_KEY")
+GROQ_API_KEY        = os.getenv("GROQ_API_KEY")
+INDEX_NAME          = os.getenv("PINECONE_INDEX_NAME", "medical-chatbot")
+SECRET_KEY          = os.getenv("SECRET_KEY", "dev-secret-change-in-prod")
+FRIEND_ADVISOR_URL  = os.getenv("FRIEND_ADVISOR_URL", "http://localhost:8000/advise")
 if not PINECONE_API_KEY or not GROQ_API_KEY:
     raise ValueError("PINECONE_API_KEY or GROQ_API_KEY missing in .env!")
 
@@ -43,52 +45,11 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 CORS(app)
 
-# ── SQLite — zero install, built into Python ─────────────────────────────────
+# ── Database — all schema, tables and migrations live in db.py ───────────────
 import sqlite3, json
+from db import get_db, init_db
 
-def get_db():
-    """Return a new SQLite connection (thread-safe: one per request)."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def _init_db():
-    """Create tables on first run."""
-    with get_db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                session_id    TEXT PRIMARY KEY,
-                user_id       TEXT NOT NULL,
-                created_at    TEXT NOT NULL,
-                last_disease  TEXT DEFAULT '',
-                last_severity TEXT DEFAULT ''
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                user_id    TEXT NOT NULL,
-                role       TEXT NOT NULL,
-                content    TEXT NOT NULL,
-                ts         TEXT NOT NULL,
-                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_user ON sessions(user_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_sess ON messages(session_id)")
-        # Migrate existing DBs that don't have the new columns yet
-        try:
-            conn.execute("ALTER TABLE sessions ADD COLUMN last_disease  TEXT DEFAULT ''")
-        except Exception:
-            pass
-        try:
-            conn.execute("ALTER TABLE sessions ADD COLUMN last_severity TEXT DEFAULT ''")
-        except Exception:
-            pass
-
-_init_db()
-print("✅ SQLite ready →", DB_PATH)
+init_db()
 
 # ── Vector Stores — two Pinecone namespaces ──────────────────────────────────
 def _init_vector_stores():
@@ -160,6 +121,124 @@ nutrition_chain = (
     | chat_model
     | StrOutputParser()
 )
+
+# ── Chain C: Home care / exercise plan (shown to user) ───────────────────────
+# Only invoked for MILD and MODERATE severity.
+# CRITICAL / URGENT skip it — emergency modal takes over.
+home_care_chain = (
+    ChatPromptTemplate.from_messages([
+        ("system", home_care_prompt),
+        ("human", "Generate the home management plan for {disease} (severity: {severity}).")
+    ])
+    | chat_model
+    | StrOutputParser()
+)
+
+# ── Chain D: Food suggestion — for friend's meal planning system ─────────────
+# Takes disease + region + parsed macro targets → full meal plan JSON.
+# Called via POST /api/food-suggestions (separate from the main chat pipeline).
+food_suggestion_chain = (
+    ChatPromptTemplate.from_messages([
+        ("system", food_suggestion_prompt),
+        ("human",  "Generate the full day meal plan for {disease} patient in {region}.")
+    ])
+    | chat_model
+    | StrOutputParser()
+)
+
+def _get_restrictions(disease: str) -> str:
+    """Return disease-specific dietary restrictions string for the food prompt."""
+    disease_lower = disease.lower().strip()
+    for key, val in DISEASE_RESTRICTIONS.items():
+        if key in disease_lower or disease_lower in key:
+            return val
+    return DISEASE_RESTRICTIONS["default"]
+
+def _parse_macro_targets(nutrition_json: dict) -> dict:
+    """
+    Convert stored nutrition_json (direction-based) into gram values
+    the food suggestion chain can use directly.
+    Uses standard 2000 kcal reference and adjusts by direction.
+    """
+    # Baseline gram values for a 2000 kcal diet
+    base = {
+        "carbs_g":   250,   # 50% of 2000 kcal / 4 kcal per g
+        "protein_g":  75,   # 15% of 2000 kcal / 4 kcal per g
+        "fat_g":      56,   # 25% of 2000 kcal / 9 kcal per g
+        "fiber_g":    28,
+        "water_l":   2.7,
+    }
+    direction_multiplier = {
+        "increase": 1.25,
+        "decrease": 0.75,
+        "restrict": 0.50,
+        "normal":   1.00,
+    }
+    nutrients = nutrition_json.get("nutrients", {})
+    result    = dict(base)
+
+    mapping = {
+        "carbohydrates": "carbs_g",
+        "protein":       "protein_g",
+        "fat":           "fat_g",
+        "fiber":         "fiber_g",
+        "water":         "water_l",
+    }
+    for nutrient_key, gram_key in mapping.items():
+        for stored_key, data in nutrients.items():
+            if nutrient_key in stored_key:
+                direction  = data.get("direction", "normal")
+                multiplier = direction_multiplier.get(direction, 1.0)
+                result[gram_key] = round(base[gram_key] * multiplier, 1)
+                break
+
+    return result
+def _parse_nutrition_table(markdown_table: str, disease: str) -> dict:
+    """
+    Parse the markdown nutrition table into structured JSON for friend's food system.
+    Returns a dict with each nutrient as a key.
+    """
+    result = {"disease": disease, "nutrients": {}}
+    try:
+        rows = [line.strip() for line in markdown_table.splitlines()
+                if line.strip().startswith("|") and "---" not in line]
+        # skip header row
+        for row in rows[1:]:
+            cols = [c.strip() for c in row.split("|") if c.strip()]
+            if len(cols) >= 3:
+                nutrient = cols[0].lower().replace(" ", "_")
+                amount   = cols[1]
+                note     = cols[2] if len(cols) > 2 else ""
+                # extract direction
+                direction = "normal"
+                if "↑" in amount or "up" in amount.lower():  direction = "increase"
+                elif "↓" in amount or "down" in amount.lower(): direction = "decrease"
+                elif "restrict" in amount.lower():             direction = "restrict"
+                result["nutrients"][nutrient] = {
+                    "recommended": amount,
+                    "direction":   direction,
+                    "note":        note,
+                }
+    except Exception as e:
+        print(f"⚠️  Nutrition parse error: {e}")
+    return result
+
+def _store_nutrition_targets(user_id: str, session_id: str, disease: str,
+                              nutrition_json: dict) -> None:
+    """Store parsed nutrition targets in DB for friend's food recommendation system."""
+    try:
+        db = get_db()
+        db.execute(
+            "INSERT INTO nutrition_targets (user_id, session_id, disease, nutrition_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (user_id, session_id, disease,
+             json.dumps(nutrition_json),
+             datetime.now(timezone.utc).isoformat())
+        )
+        db.commit()
+        print(f"✅ Nutrition targets stored silently for user {user_id}")
+    except Exception as e:
+        print(f"⚠️  Nutrition store error: {e}")
 
 # ════════════════════════════════════════════════════════════════════════════
 # USER / SESSION HELPERS
@@ -476,7 +555,7 @@ def _assess_severity(query: str, disease: str, disease_info: str,
             "call":    "108",
         },
         "URGENT": {
-            "show":    True,
+            "show":    False,
             "color":   "#ff6d00",
             "icon":    "⚠️",
             "title":   "See a Doctor Today — Do Not Delay",
@@ -571,15 +650,17 @@ def _format_symptom_context(sx: dict) -> str:
     return "\n".join(lines)
 
 
-def run_pipeline(query: str) -> dict:
+def run_pipeline(query: str, user_id: str = None, session_id: str = None) -> dict:
     """
-    Full pipeline with 3 robustness upgrades:
+    Full pipeline — 5 steps:
 
     Step 0 — Symptom extraction: parse structured fields from raw query
     Step 1 — RAG disease chain: retrieve + identify with structured context
     Step 2 — Fallback disease chain: pure LLM reasoning if RAG returns 'general'
-    Step 3 — Nutrition chain: richer retrieval query + disease_info context
+    Step 3 — Nutrition chain: runs SILENTLY — stored in DB for friend's food system
     Step 4 — Severity: structured context (age, duration, worsening) passed in
+    Step 5 — Home care chain: exercise/rest/monitoring table shown to user
+             (skipped for CRITICAL / URGENT — emergency modal takes over)
     """
 
     # ── Step 0: Extract structured symptoms ─────────────────────────────────
@@ -622,34 +703,66 @@ def run_pipeline(query: str) -> dict:
         except Exception as e:
             print(f"⚠️  Fallback chain error: {e}")
 
-    # ── Step 3: Nutrition chain ───────────────────────────────────────────────
-    if identified_disease.lower() in ("general", "unknown", ""):
-        nutrition_resp = (
-            "_I need a bit more information to give you an accurate nutrition plan. "
-            "Could you share: how long you've had these symptoms, your age, "
-            "and any existing health conditions or medications?_"
-        )
-    else:
+    # ── Step 3: Nutrition chain — stored in DB + shown temporarily for testing ─
+    nutrition_json = {}
+    nutrition_md   = ""
+    if identified_disease.lower() not in ("general", "unknown", ""):
         print(f"🥗 Step 3: Nutrition for {identified_disease}…")
-        nutrition_resp = nutrition_chain.invoke({
-            "disease":      identified_disease,
-            "disease_info": clean_disease[:600],
-        })
+        try:
+            nutrition_md   = nutrition_chain.invoke({
+                "disease":      identified_disease,
+                "disease_info": clean_disease[:600],
+            })
+            nutrition_json = _parse_nutrition_table(nutrition_md, identified_disease)
+            if user_id and session_id:
+                _store_nutrition_targets(user_id, session_id, identified_disease, nutrition_json)
+        except Exception as e:
+            print(f"⚠️  Nutrition chain error: {e}")
 
     # ── Step 4: Severity — pass structured context ───────────────────────────
     print("🚦 Step 4: Severity assessment…")
     severity = _assess_severity(
-        query          = query,
-        disease        = identified_disease,
-        disease_info   = clean_disease,
-        symptom_data   = sx,           # ← structured context now passed in
+        query        = query,
+        disease      = identified_disease,
+        disease_info = clean_disease,
+        symptom_data = sx,
     )
+    sev_level = severity["severity"]
+
+    # ── Step 5: Home care chain — only for MILD / MODERATE ───────────────────
+    home_care_table = ""
+    if identified_disease.lower() not in ("general", "unknown", "") \
+            and sev_level in ("MILD", "MODERATE", "URGENT"):
+        print(f"🏃 Step 5: Home care plan for {identified_disease} ({sev_level})…")
+        try:
+            home_care_table = home_care_chain.invoke({
+                "disease":      identified_disease,
+                "severity":     sev_level,
+                "disease_info": clean_disease[:500],
+            })
+        except Exception as e:
+            print(f"⚠️  Home care chain error: {e}")
+
+    # ── Build reply shown to user ─────────────────────────────────────────────
+    if identified_disease.lower() in ("general", "unknown", ""):
+        reply = (
+            "_I need a bit more information to give you an accurate assessment. "
+            "Could you share: how long you've had these symptoms, your age, "
+            "and any existing health conditions or medications?_"
+        )
+    else:
+        reply = clean_disease
+        if nutrition_md:
+            reply += f"\n\n**🥗 Daily Nutrition Targets**\n\n{nutrition_md}"
+        if home_care_table:
+            reply += f"\n\n**🏥 Home Management Plan**\n\n{home_care_table}"
 
     return {
         "identified_disease": identified_disease,
         "disease_info":       clean_disease,
-        "nutrition_plan":     nutrition_resp,
-        "reply":              f"{clean_disease}\n\n{nutrition_resp}",
+        "home_care":          home_care_table,
+        "nutrition_json":     nutrition_json,   # internal only
+        "reply":              reply,
         "severity":           severity,
         "used_fallback":      used_fallback,
     }
@@ -902,6 +1015,106 @@ def describe_image(image_bytes: bytes, mime: str = "image/jpeg") -> str:
     return final_result
 
 # ════════════════════════════════════════════════════════════════════════════
+# CULTURAL ADVICE — friend's HuggingFace healthAdvisor microservice integration
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Friend's service expects a flat string of comma-separated key:value pairs:
+#
+#   "Age: 35, Gender: Female, State: West Bengal,
+#    Dietary preference: Non-vegetarian,
+#    Fat: 15%, Carbohydrate: 65%, Protein: 20%,
+#    Fibre: Low, Water: Low, Vitamins: Normal, Minerals: Normal"
+#
+# Returns: { "cultural_adapted_text": "..." }
+# ════════════════════════════════════════════════════════════════════════════
+
+def _status_from_direction(direction: str) -> str:
+    """
+    Map our nutrition_targets direction → friend's Low/Normal/High status.
+    'increase'  → patient should consume more  → currently 'Low'
+    'decrease'  → patient should consume less  → currently 'High'
+    'restrict'  → patient must avoid          → currently 'High'
+    'normal'    → no change                    → 'Normal'
+    """
+    d = (direction or "normal").lower()
+    if d == "increase": return "Low"
+    if d in ("decrease", "restrict"): return "High"
+    return "Normal"
+
+
+def _direction_to_macro_pct(macros_g: dict) -> dict:
+    """
+    Convert gram values from _parse_macro_targets() back into percentages
+    of total daily calories. Friend's prompt expects integer percentages.
+    Carbs: 4 kcal/g | Protein: 4 kcal/g | Fat: 9 kcal/g
+    """
+    carbs_kcal   = macros_g["carbs_g"]   * 4
+    protein_kcal = macros_g["protein_g"] * 4
+    fat_kcal     = macros_g["fat_g"]     * 9
+    total        = carbs_kcal + protein_kcal + fat_kcal
+    if total <= 0:
+        return {"carb_pct": 50, "protein_pct": 20, "fat_pct": 30}
+    return {
+        "carb_pct":    round(carbs_kcal   / total * 100),
+        "protein_pct": round(protein_kcal / total * 100),
+        "fat_pct":     round(fat_kcal     / total * 100),
+    }
+
+
+def _build_advisor_payload(profile: dict, nutrition_json: dict) -> dict:
+    """
+    Build the JSON body sent to friend's POST /advise endpoint.
+    profile: row from user_profile (age, gender, state, diet_preference)
+    nutrition_json: stored direction-based targets
+    """
+    macros_g = _parse_macro_targets(nutrition_json)
+    pcts     = _direction_to_macro_pct(macros_g)
+
+    nutrients = nutrition_json.get("nutrients", {})
+
+    def _status(name: str) -> str:
+        for key, data in nutrients.items():
+            if name in key:
+                return _status_from_direction(data.get("direction", "normal"))
+        return "Normal"
+
+    return {
+        "age":             profile.get("age"),
+        "gender":          profile.get("gender", ""),
+        "state":           profile.get("state", ""),
+        "diet_preference": profile.get("diet_preference", ""),
+        "fat_pct":         pcts["fat_pct"],
+        "carb_pct":        pcts["carb_pct"],
+        "protein_pct":     pcts["protein_pct"],
+        "fibre":           _status("fiber"),
+        "water":           _status("water"),
+        "vitamins":        _status("vitamin"),
+        "minerals":        _status("mineral"),
+    }
+
+
+def _call_friend_advisor(payload: dict, timeout: float = 60.0) -> dict:
+    """
+    POST to friend's microservice. Returns parsed JSON or raises RuntimeError.
+    Times out at 60s — local LLM inference can be slow.
+    """
+    import httpx
+    try:
+        resp = httpx.post(FRIEND_ADVISOR_URL, json=payload, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.ConnectError:
+        raise RuntimeError(
+            f"Cultural advisor service unreachable at {FRIEND_ADVISOR_URL}. "
+            "Make sure your friend's FastAPI service is running."
+        )
+    except httpx.HTTPStatusError as e:
+        raise RuntimeError(f"Advisor service returned {e.response.status_code}: {e.response.text[:200]}")
+    except Exception as e:
+        raise RuntimeError(f"Advisor call failed: {e}")
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # ROUTES
 # ════════════════════════════════════════════════════════════════════════════
 @app.route("/")
@@ -924,7 +1137,7 @@ def get_bot_response():
         ctx     = _history_ctx(history)
         query   = f"{ctx}\nPatient: {user_msg}" if ctx else user_msg
 
-        result  = run_pipeline(query)
+        result  = run_pipeline(query, user_id=user_id, session_id=sid)
 
         _append_msgs(user_id, sid, [
             {"role": "user",      "content": user_msg},
@@ -935,12 +1148,12 @@ def get_bot_response():
                              result["severity"]["severity"])
 
         return jsonify({
-            "session_id":    sid,
-            "disease":       result["identified_disease"],
-            "disease_info":  result["disease_info"],
-            "nutrition_plan":result["nutrition_plan"],
-            "reply":         result["reply"],
-            "severity":      result["severity"],
+            "session_id":   sid,
+            "disease":      result["identified_disease"],
+            "disease_info": result["disease_info"],
+            "home_care":    result["home_care"],
+            "reply":        result["reply"],
+            "severity":     result["severity"],
         })
 
     except Exception as e:
@@ -966,12 +1179,7 @@ def get_voice_response():
         history = _get_msgs(user_id, sid)
         ctx     = _history_ctx(history)
         query   = f"{ctx}\nPatient: {transcript}" if ctx else transcript
-        result  = run_pipeline(query)
-
-        _append_msgs(user_id, sid, [
-            {"role": "user",      "content": f"[Voice] {transcript}"},
-            {"role": "assistant", "content": result["reply"]},
-        ])
+        result  = run_pipeline(query, user_id=user_id, session_id=sid)
         _update_session_meta(user_id, sid,
                              result["identified_disease"],
                              result["severity"]["severity"])
@@ -1000,7 +1208,7 @@ def get_image_response():
         history = _get_msgs(user_id, sid)
         ctx     = _history_ctx(history)
         query   = f"{ctx}\nPatient: {combined}" if ctx else combined
-        result  = run_pipeline(query)
+        result  = run_pipeline(query, user_id=user_id, session_id=sid)
 
         _append_msgs(user_id, sid, [
             {"role": "user",      "content": f"[Image] {combined}"},
@@ -1218,6 +1426,287 @@ def checkin_reply():
             "advice":     advice,
         })
 
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Nutrition Targets API — for friend's food recommendation system ───────────
+@app.route("/api/nutrition-targets/<target_user_id>", methods=["GET"])
+def get_nutrition_targets(target_user_id: str):
+    """
+    Returns the latest stored nutrition targets for a given user.
+    Called by the external food recommendation system.
+    Optionally filter by ?session_id=<sid> for a specific session.
+    """
+    try:
+        db         = get_db()
+        session_id = request.args.get("session_id")
+
+        if session_id:
+            row = db.execute(
+                "SELECT disease, nutrition_json, created_at FROM nutrition_targets "
+                "WHERE user_id=? AND session_id=? ORDER BY id DESC LIMIT 1",
+                (target_user_id, session_id)
+            ).fetchone()
+        else:
+            row = db.execute(
+                "SELECT disease, nutrition_json, created_at FROM nutrition_targets "
+                "WHERE user_id=? ORDER BY id DESC LIMIT 1",
+                (target_user_id,)
+            ).fetchone()
+
+        if not row:
+            return jsonify({"error": "No nutrition data found for this user"}), 404
+
+        import json as _json
+        return jsonify({
+            "user_id":    target_user_id,
+            "disease":    row["disease"],
+            "created_at": row["created_at"],
+            "targets":    _json.loads(row["nutrition_json"]),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/food-suggestions", methods=["POST"])
+def food_suggestions():
+    """
+    POST /api/food-suggestions
+    Called by friend's food recommendation system.
+
+    Request JSON:
+    {
+        "user_id":  "<user_id>",          # required
+        "region":   "West Bengal, India", # from browser geolocation reverse-geocode
+        "session_id": "<sid>"             # optional — uses latest if omitted
+    }
+
+    Response JSON:
+    {
+        "disease":       "Influenza",
+        "region":        "West Bengal, India",
+        "daily_targets": { "carbs_g": 188, "protein_g": 94, ... },
+        "meal_plan": {
+            "breakfast": { "target_calories": "...", "items": [...] },
+            "lunch":     { ... },
+            "dinner":    { ... }
+        },
+        "foods_to_avoid":  ["..."],
+        "hydration_note":  "..."
+    }
+    """
+    try:
+        data       = request.get_json(force=True)
+        user_id    = data.get("user_id", "").strip()
+        region     = data.get("region", "India").strip()
+        session_id = data.get("session_id")
+
+        if not user_id:
+            return jsonify({"error": "user_id is required"}), 400
+
+        # ── Fetch latest nutrition targets from DB ───────────────────────────
+        db = get_db()
+        if session_id:
+            row = db.execute(
+                "SELECT disease, nutrition_json FROM nutrition_targets "
+                "WHERE user_id=? AND session_id=? ORDER BY id DESC LIMIT 1",
+                (user_id, session_id)
+            ).fetchone()
+        else:
+            row = db.execute(
+                "SELECT disease, nutrition_json FROM nutrition_targets "
+                "WHERE user_id=? ORDER BY id DESC LIMIT 1",
+                (user_id,)
+            ).fetchone()
+
+        if not row:
+            return jsonify({
+                "error": "No nutrition data found for this user. "
+                         "User must complete a medical chat session first."
+            }), 404
+
+        disease      = row["disease"]
+        nutrition_js = json.loads(row["nutrition_json"])
+
+        # ── Convert direction-based targets → gram values ────────────────────
+        macros       = _parse_macro_targets(nutrition_js)
+        restrictions = _get_restrictions(disease)
+
+        # ── Run food suggestion chain ────────────────────────────────────────
+        raw = food_suggestion_chain.invoke({
+            "disease":    disease,
+            "region":     region,
+            "carbs_g":    macros["carbs_g"],
+            "protein_g":  macros["protein_g"],
+            "fat_g":      macros["fat_g"],
+            "fiber_g":    macros["fiber_g"],
+            "water_l":    macros["water_l"],
+            "restrictions": restrictions,
+        })
+
+        # ── Parse JSON response ──────────────────────────────────────────────
+        clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+        meal_plan = json.loads(clean)
+        return jsonify(meal_plan)
+
+    except json.JSONDecodeError:
+        # LLM returned malformed JSON — return raw text for debugging
+        return jsonify({"error": "Failed to parse meal plan", "raw": raw}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── User Profile API (Age / Gender / State / Diet preference) ───────────────
+@app.route("/api/profile", methods=["GET"])
+def get_profile():
+    """Return the current user's saved profile, or {exists: false} if not yet set."""
+    user_id = get_current_user()
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT age, gender, state, diet_preference, updated_at "
+            "FROM user_profile WHERE user_id=?",
+            (user_id,)
+        ).fetchone()
+    if not row:
+        return jsonify({"exists": False})
+    return jsonify({
+        "exists":          True,
+        "age":             row["age"],
+        "gender":          row["gender"],
+        "state":           row["state"],
+        "diet_preference": row["diet_preference"],
+        "updated_at":      row["updated_at"],
+    })
+
+
+@app.route("/api/profile", methods=["POST"])
+def save_profile():
+    """Upsert the current user's profile."""
+    try:
+        user_id = get_current_user()
+        data    = request.get_json(force=True) or {}
+
+        age             = data.get("age")
+        gender          = (data.get("gender") or "").strip()
+        state           = (data.get("state") or "").strip()
+        diet_preference = (data.get("diet_preference") or "").strip()
+
+        if not all([age, gender, state, diet_preference]):
+            return jsonify({"error": "age, gender, state and diet_preference are all required"}), 400
+
+        try:
+            age = int(age)
+        except (TypeError, ValueError):
+            return jsonify({"error": "age must be an integer"}), 400
+        if age < 1 or age > 120:
+            return jsonify({"error": "age out of range"}), 400
+
+        ts = datetime.now(timezone.utc).isoformat()
+        with get_db() as conn:
+            conn.execute("""
+                INSERT INTO user_profile (user_id, age, gender, state, diet_preference, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    age             = excluded.age,
+                    gender          = excluded.gender,
+                    state           = excluded.state,
+                    diet_preference = excluded.diet_preference,
+                    updated_at      = excluded.updated_at
+            """, (user_id, age, gender, state, diet_preference, ts))
+
+        return jsonify({"ok": True, "user_id": user_id})
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Cultural Advice — orchestrates profile + nutrition_targets + friend's API ─
+@app.route("/api/cultural-advice", methods=["POST"])
+def cultural_advice():
+    """
+    POST /api/cultural-advice
+    Body (JSON, optional): { "session_id": "<sid>" }   # uses latest if omitted
+
+    Pipeline:
+      1. Load user_profile (must exist — frontend collects via form first)
+      2. Load latest nutrition_targets for this user (or session_id if given)
+      3. Build flat payload with macros% + nutrient status
+      4. Call friend's FastAPI /advise endpoint
+      5. Return cultural_adapted_text + the payload we sent (for debugging)
+    """
+    try:
+        user_id    = get_current_user()
+        body       = request.get_json(silent=True) or {}
+        session_id = body.get("session_id")
+
+        # ── 1. Profile must exist ───────────────────────────────────────────
+        with get_db() as conn:
+            prow = conn.execute(
+                "SELECT age, gender, state, diet_preference "
+                "FROM user_profile WHERE user_id=?",
+                (user_id,)
+            ).fetchone()
+        if not prow:
+            return jsonify({
+                "error":         "profile_missing",
+                "message":       "Please fill in your profile first (Age, Gender, State, Diet preference).",
+            }), 400
+
+        profile = {
+            "age":             prow["age"],
+            "gender":          prow["gender"],
+            "state":           prow["state"],
+            "diet_preference": prow["diet_preference"],
+        }
+
+        # ── 2. Nutrition targets must exist ─────────────────────────────────
+        with get_db() as conn:
+            if session_id:
+                nrow = conn.execute(
+                    "SELECT disease, nutrition_json FROM nutrition_targets "
+                    "WHERE user_id=? AND session_id=? ORDER BY id DESC LIMIT 1",
+                    (user_id, session_id)
+                ).fetchone()
+            else:
+                nrow = conn.execute(
+                    "SELECT disease, nutrition_json FROM nutrition_targets "
+                    "WHERE user_id=? ORDER BY id DESC LIMIT 1",
+                    (user_id,)
+                ).fetchone()
+
+        if not nrow:
+            return jsonify({
+                "error":   "nutrition_missing",
+                "message": "No diagnosis yet. Describe your symptoms first so I can identify a condition."
+            }), 400
+
+        disease        = nrow["disease"]
+        nutrition_json = json.loads(nrow["nutrition_json"])
+
+        # ── 3. Build payload ─────────────────────────────────────────────────
+        payload = _build_advisor_payload(profile, nutrition_json)
+
+        # ── 4. Call friend's microservice ────────────────────────────────────
+        result = _call_friend_advisor(payload)
+
+        # ── 5. Return result ─────────────────────────────────────────────────
+        cultural_text = result.get("cultural_adapted_text") \
+                     or result.get("text") \
+                     or ""
+
+        return jsonify({
+            "disease":               disease,
+            "cultural_adapted_text": cultural_text,
+            "profile":               profile,
+            "payload_sent":          payload,
+        })
+
+    except RuntimeError as e:
+        # Friend's service is down or returned an error — be specific
+        return jsonify({"error": "advisor_unavailable", "message": str(e)}), 503
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500

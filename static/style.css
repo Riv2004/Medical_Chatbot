@@ -227,7 +227,7 @@ body,html{
    (all match your existing dark transparent palette)
    ════════════════════════════════════════════════════════ */
 
-/* Taller card to fit nutrition table */
+/* Taller card to fit home care table */
 .card {
     height: 600px;
 }
@@ -252,26 +252,64 @@ body,html{
     letter-spacing: 0.3px;
 }
 
-/* Nutrition table inside bot bubble */
+/* Home care / exercise table inside bot bubble */
 .msg_cotainer table {
     border-collapse: collapse;
     width: 100%;
-    margin-top: 8px;
+    margin-top: 10px;
     font-size: 12px;
     color: #fff;
+    border-radius: 8px;
+    overflow: hidden;
 }
 .msg_cotainer table th {
-    background: rgba(0, 0, 0, 0.3);
-    padding: 5px 8px;
+    background: rgba(0, 180, 120, 0.25);
+    padding: 6px 8px;
     text-align: left;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+    border-bottom: 1px solid rgba(0, 200, 120, 0.3);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.3px;
+    color: #a8ffda;
 }
 .msg_cotainer table td {
-    padding: 4px 8px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 5px 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    vertical-align: top;
+    line-height: 1.4;
 }
 .msg_cotainer table tr:nth-child(even) td {
     background: rgba(0, 0, 0, 0.12);
+}
+.msg_cotainer table tr:first-child td,
+.msg_cotainer table tr:first-child th {
+    padding-top: 7px;
+}
+/* Category icon column — first td per row */
+.msg_cotainer table td:first-child {
+    font-size: 14px;
+    width: 24px;
+    text-align: center;
+    padding-right: 4px;
+}
+/* Home care section heading */
+.home-care-heading {
+    font-size: 12px;
+    font-weight: 700;
+    color: #a8ffda;
+    letter-spacing: 0.4px;
+    margin: 12px 0 6px 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.home-care-heading::before {
+    content: "";
+    display: inline-block;
+    width: 3px;
+    height: 13px;
+    background: #4caf92;
+    border-radius: 2px;
 }
 
 /* Typing animation */

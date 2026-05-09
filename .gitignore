@@ -210,4 +210,10 @@ __marimo__/
 
 Miniconda3-latest-MacOSX-arm64.sh
 
+# Local chat history database (user data — do not commit)
+chat_history.db
+
+# Local scratch / experimental work
+temporary/
+
 
